@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Crypto Trading Bot</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --panel2: #1c2230; --line: #30363d;
+    --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --blue: #58a6ff; --purple: #bc8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10;
+  }
+  h1 { font-size: 16px; margin: 0; letter-spacing: .5px; }
+  .pill {
+    padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--line); background: var(--panel2);
+  }
+  .pill.live { background: #3d1418; border-color: var(--red); color: var(--red); }
+  .pill.paper { background: #12261a; border-color: var(--green); color: var(--green); }
+  .grow { flex: 1; }
+  main { padding: 20px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+  section > h2 {
+    margin: 0; padding: 10px 14px; font-size: 12px; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--line); background: var(--panel2);
+  }
+  .body { padding: 14px; }
+  .wide { grid-column: 1 / -1; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  .kv div:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; color: var(--muted); font-weight: 500; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .8px; padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  td { padding: 8px 10px; border-bottom: 1px solid #21262d; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .pos { color: var(--green); } .neg { color: var(--red); } .muted { color: var(--muted); }
+  .tag {
+    display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px;
+    background: var(--panel2); border: 1px solid var(--line);
+  }
+  .tag.best { background: #12261a; border-color: var(--green); color: var(--green); }
+  .tag.tradable { background: #10233b; border-color: var(--blue); color: var(--blue); }
+  .bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--blue); }
+  button {
+    font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+  }
+  button:hover { border-color: var(--blue); }
+  button.danger { border-color: var(--red); color: var(--red); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .HEALTHY { background: var(--green); } .WARNING { background: var(--amber); }
+  .ERROR { background: var(--red); } .UNKNOWN { background: var(--muted); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  #curve { width: 100%; height: 140px; display: block; }
+  .empty { color: var(--muted); padding: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 CRYPTO TRADING BOT</h1>
+  <span class="pill" id="state">…</span>
+  <span class="pill" id="mode">…</span>
+  <span class="pill" id="health">…</span>
+  <span class="grow"></span>
+  <span class="muted" id="updated">connecting…</span>
+  <button id="pause">⏸ Pause</button>
+  <button id="resume">▶️ Resume</button>
+  <button class="danger" id="emergency">🚨 Emergency</button>
+</header>
+
+<main>
+  <section>
+    <h2>Account</h2>
+    <div class="body"><div class="kv" id="account"></div></div>
+  </section>
+
+  <section>
+    <h2>Risk</h2>
+    <div class="body"><div class="kv" id="risk"></div></div>
+  </section>
+
+  <section>
+    <h2>Health</h2>
+    <div class="body" id="healthList"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Equity</h2>
+    <div class="body"><canvas id="curve"></canvas></div>
+  </section>
+
+  <section class="wide">
+    <h2>Open Positions</h2>
+    <div class="body" id="positions"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Market Scanner</h2>
+    <div class="body" id="scanner"></div>
+    <div class="body note">A high score is not permission to trade — the risk engine has the final say.</div>
+  </section>
+
+  <section class="wide">
+    <h2>Performance</h2>
+    <div class="body"><div class="kv" id="performance"></div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "–" : Number(v).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const pct = (v, d = 2) => (v === null || v === undefined || isNaN(v)) ? "–" : (Number(v) * 100).toFixed(d) + "%";
+const sign = (v) => (v === null || v === undefined || isNaN(v)) ? "–" : (Number(v) >= 0 ? "+" : "") + fmt(v);
+const cls = (v) => Number(v) > 0 ? "pos" : (Number(v) < 0 ? "neg" : "");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function kv(el, pairs) {
+  el.innerHTML = pairs.map(([k, v, c]) => `<div>${esc(k)}</div><div class="${c || ""}">${v}</div>`).join("");
+}
+
+function render(s) {
+  const st = s.status || {}, acc = s.account || {}, risk = s.risk || {};
+
+  $("state").textContent = `${st.emoji || ""} ${st.state || "?"}`;
+  const mode = (st.mode || "").toUpperCase();
+  $("mode").textContent = mode + (mode === "LIVE" ? " · REAL MONEY" : "");
+  $("mode").className = "pill " + (mode === "LIVE" ? "live" : "paper");
+  const hs = (s.health && s.health.state) || "UNKNOWN";
+  $("health").innerHTML = `<span class="dot ${hs}"></span>${hs}`;
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+
+  kv($("account"), [
+    ["Equity", "$" + fmt(acc.equity)],
+    ["Balance", "$" + fmt(acc.balance)],
+    ["Available margin", "$" + fmt(acc.available)],
+    ["Used margin", "$" + fmt(acc.used_margin)],
+    ["Unrealised PnL", sign(acc.unrealized_pnl), cls(acc.unrealized_pnl)],
+    ["Realised today", sign(acc.realized_pnl_day), cls(acc.realized_pnl_day)],
+    ["Peak equity", "$" + fmt(acc.peak_equity)],
+    ["Drawdown", pct(acc.drawdown), Number(acc.drawdown) > 0.03 ? "neg" : ""],
+    ["Open positions", acc.open_positions ?? 0],
+  ]);
+
+  kv($("risk"), [
+    ["Risk / trade", pct(risk.risk_per_trade)],
+    ["Portfolio risk", pct(risk.effective_risk_pct)],
+    ["Largest cluster", pct(risk.cluster_risk_pct)],
+    ["Max portfolio risk", pct(risk.max_portfolio_risk)],
+    ["Daily loss", pct(risk.daily_loss_pct)],
+    ["Max daily loss", pct(risk.max_daily_loss)],
+    ["Gross leverage", fmt(risk.gross_leverage) + "x"],
+    ["Losing streak", risk.consecutive_losses ?? 0],
+    ["Budget left", "$" + fmt(risk.remaining_risk_budget)],
+    ["Breakers", `<span class="tag">${esc(risk.breaker_state || "?")}</span>`],
+  ]);
+
+  const comps = (s.health && s.health.components) || [];
+  $("healthList").innerHTML = comps.length
+    ? comps.map(c => `<div><span class="dot ${esc(c.state)}"></span>${esc(c.name)} <span class="muted">${esc(c.detail || "")}</span></div>`).join("")
+    : '<div class="empty">no health data yet</div>';
+
+  const positions = s.positions || [];
+  $("positions").innerHTML = positions.length ? `<table>
+    <tr><th>Symbol</th><th>Side</th><th>Lev</th><th>Entry</th><th>Price</th><th>Stop</th><th>TP1/2/3</th><th>PnL</th><th>R</th><th>Risk left</th></tr>
+    ${positions.map(p => `<tr>
+      <td><b>${esc(p.symbol)}</b></td>
+      <td class="${p.side === 'long' ? 'pos' : 'neg'}">${esc(p.side.toUpperCase())}</td>
+      <td>${fmt(p.leverage, 1)}x</td>
+      <td>${fmt(p.entry, 6)}</td>
+      <td>${fmt(p.current, 6)}</td>
+      <td>${fmt(p.stop_loss, 6)}${p.breakeven ? ' <span class="tag">BE</span>' : ''}${p.trailing ? ' <span class="tag">TRAIL</span>' : ''}</td>
+      <td class="muted">${fmt(p.tp1, 4)} / ${fmt(p.tp2, 4)} / ${fmt(p.tp3, 4)}</td>
+      <td class="${cls(p.unrealized_pnl)}">${sign(p.unrealized_pnl)}</td>
+      <td class="${cls(p.r_multiple)}">${sign(p.r_multiple)}R</td>
+      <td>$${fmt(p.open_risk)}</td>
+    </tr>`).join("")}</table>` : '<div class="empty">no open positions</div>';
+
+  const scan = s.scanner || [];
+  $("scanner").innerHTML = scan.length ? `<table>
+    <tr><th>Symbol</th><th>Score</th><th>Trend</th><th>Conf</th><th>R:R</th><th>Regime</th><th>Status</th><th>Why</th></tr>
+    ${scan.map(o => {
+      const tag = o.status === "BEST SETUP" ? "best" : (o.status === "TRADABLE" ? "tradable" : "");
+      const why = (o.reasons && o.reasons.length) ? o.reasons.slice(0, 3).join(" + ")
+                : ((o.rejections && o.rejections[0]) || "");
+      return `<tr>
+        <td><b>${esc(o.symbol)}</b></td>
+        <td><div class="bar" title="${fmt(o.opportunity_score, 0)}"><i style="width:${Math.max(0, Math.min(100, o.opportunity_score))}%"></i></div>${fmt(o.opportunity_score, 0)}</td>
+        <td>${esc(o.trend)}</td>
+        <td>${pct(o.confidence, 0)}</td>
+        <td>${fmt(o.rr, 1)}</td>
+        <td class="muted">${esc(o.regime)}</td>
+        <td><span class="tag ${tag}">${esc(o.status)}</span></td>
+        <td class="muted">${esc(why).slice(0, 90)}</td>
+      </tr>`;
+    }).join("")}</table>` : '<div class="empty">scanner has not produced results yet</div>';
+
+  const perf = s.performance || {};
+  kv($("performance"), perf.trades ? [
+    ["Trades", perf.trades],
+    ["Win rate", pct(perf.win_rate)],
+    ["Net PnL", sign(perf.total_pnl), cls(perf.total_pnl)],
+    ["Profit factor", perf.profit_factor ?? "–"],
+    ["Expectancy", sign(perf.expectancy_r, 3) + "R"],
+    ["Average win", sign(perf.average_win), "pos"],
+    ["Average loss", sign(perf.average_loss), "neg"],
+    ["Fees", "$" + fmt(perf.fees)],
+  ] : [["Trades", "none closed yet"]]);
+}
+
+function drawCurve(points) {
+  const c = $("curve"), ctx = c.getContext("2d");
+  const w = c.width = c.clientWidth * devicePixelRatio;
+  const h = c.height = 140 * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  if (!points || points.length < 2) {
+    ctx.fillStyle = "#8b949e"; ctx.font = `${12 * devicePixelRatio}px monospace`;
+    ctx.fillText("not enough equity history yet", 10, h / 2);
+    return;
+  }
+  const values = points.map(p => p.equity);
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = (max - min) || 1;
+  const x = i => (i / (points.length - 1)) * (w - 8) + 4;
+  const y = v => h - 12 - ((v - min) / span) * (h - 24);
+  ctx.strokeStyle = values[values.length - 1] >= values[0] ? "#3fb950" : "#f85149";
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.beginPath();
+  points.forEach((p, i) => i ? ctx.lineTo(x(i), y(p.equity)) : ctx.moveTo(x(i), y(p.equity)));
+  ctx.stroke();
+  ctx.fillStyle = "#8b949e"; ctx.font = `${11 * devicePixelRatio}px monospace`;
+  ctx.fillText("$" + max.toFixed(2), 6, 14 * devicePixelRatio);
+  ctx.fillText("$" + min.toFixed(2), 6, h - 4);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/snapshot", {cache: "no-store"});
+    render(await r.json());
+    const e = await fetch("/api/equity?limit=400", {cache: "no-store"});
+    drawCurve((await e.json()).points);
+  } catch (err) {
+    $("updated").textContent = "connection lost — retrying";
+  }
+}
+
+function connect() {
+  // The WebSocket is an optimisation; polling is the fallback and always runs.
+  try {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.onmessage = (e) => { try { render(JSON.parse(e.data)); } catch (_) {} };
+    ws.onclose = () => setTimeout(connect, 5000);
+  } catch (_) { /* fallback server has no /ws */ }
+}
+
+async function control(path, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const token = localStorage.getItem("dashboardToken") || "";
+  const r = await fetch(path, {method: "POST", headers: token ? {"X-Dashboard-Token": token} : {}});
+  if (r.status === 401) {
+    const t = prompt("Dashboard token:");
+    if (t) { localStorage.setItem("dashboardToken", t); return control(path, null); }
+    return;
+  }
+  poll();
+}
+
+$("pause").onclick = () => control("/api/control/pause");
+$("resume").onclick = () => control("/api/control/resume");
+$("emergency").onclick = () => control("/api/control/emergency",
+  "EMERGENCY STOP\n\nThis market-closes every open position and stops the bot.\nLosses are crystallised immediately.\n\nProceed?");
+
+poll();
+connect();
+setInterval(poll, 4000);
+</script>
+</body>
+</html>
