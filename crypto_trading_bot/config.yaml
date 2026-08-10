@@ -1,0 +1,76 @@
+# ===========================================================================
+# Non-secret tuning.  Safe to commit.
+#
+# Precedence: environment variables > .env > this file > built-in defaults.
+# Anything set in .env overrides the same key here, so .env stays the single
+# place you edit for a deployment and this file documents the strategy shape.
+#
+# SECRETS ARE FORBIDDEN HERE.  The loader raises on any key matching
+# secret/token/api_key/password so a credential cannot be committed by accident.
+# ===========================================================================
+
+# Nested keys flatten to SECTION_KEY, e.g. risk.max_leverage -> MAX_LEVERAGE.
+
+risk:
+  default_risk_per_trade: 0.005
+  max_daily_loss: 0.02
+  max_portfolio_risk: 0.02
+  max_correlated_exposure: 0.012
+  correlation_threshold: 0.7
+  max_drawdown_stop: 0.10
+  max_consecutive_losses: 4
+  max_open_positions: 3
+  max_leverage: 3
+  min_leverage: 1
+  max_position_notional_pct: 1.0
+
+signal:
+  min_confidence: 0.70
+  min_rr: 2.0
+  min_atr_pct: 0.0015
+  max_atr_pct: 0.15
+  max_spread_pct: 0.0008
+  min_24h_quote_volume: 5000000
+
+scanner:
+  max_symbols_to_scan: 100
+  scanner_interval_seconds: 60
+  deep_analysis_count: 15
+  quote_currency: USDT
+  # Symbols to never trade, e.g. [LUNAUSDT, USTCUSDT]
+  symbol_blacklist: []
+
+execution:
+  taker_fee: 0.0006
+  maker_fee: 0.0002
+  slippage_pct: 0.0005
+  latency_ms: 250
+  funding_interval_hours: 8
+  order_poll_seconds: 3.0
+  reconcile_interval_seconds: 60
+
+position:
+  tp1_r: 1.0
+  tp2_r: 2.0
+  tp3_r: 3.5
+  tp1_close_pct: 0.4
+  tp2_close_pct: 0.35
+  breakeven_at_r: 1.0
+  breakeven_offset_r: 0.1
+  trailing_activate_r: 1.8
+  trailing_atr_mult: 1.6
+  stop_atr_mult: 1.5
+  stop_structure_buffer_atr: 0.25
+  max_stop_pct: 0.08
+  min_stop_pct: 0.0015
+
+ml:
+  ml_enabled: true
+  ml_model_name: direction_v1
+  ml_weight: 0.35
+  ml_min_training_rows: 400
+
+loops:
+  position_manage_interval_seconds: 5.0
+  health_interval_seconds: 30.0
+  telegram_poll_timeout: 25

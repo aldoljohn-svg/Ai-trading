@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# Runtime dependencies
+#
+# The analytical and decision core (indicators, market structure, ICT, RTM,
+# regime, risk, sizing, backtest, paper engine, database) is pure standard
+# library and needs NONE of these.  Everything below is for the service layer
+# and for accelerating the ML path.  If an optional package is missing the bot
+# reports it in /health and degrades to the pure-Python path instead of
+# crashing - see app/compat.py.
+# ---------------------------------------------------------------------------
+
+# --- required for LIVE trading -------------------------------------------
+httpx==0.28.1                 # signed REST calls to MEXC + Telegram Bot API
+websockets==15.0.1            # MEXC contract WebSocket (lower-latency prices)
+
+# --- web dashboard --------------------------------------------------------
+# Without these the bot serves the same JSON API and /health from the
+# standard-library fallback server (app/dashboard/server.py), minus the
+# WebSocket push.
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pydantic==2.12.0
+
+# --- configuration --------------------------------------------------------
+PyYAML==6.0.2                 # config.yaml (a minimal fallback parser exists)
+
+# --- scientific stack (optional acceleration) -----------------------------
+# Used by the ML feature/training path and vectorised metrics.  The bot trains
+# a pure-Python softmax model when these are absent.
+numpy==2.3.3
+pandas==2.3.3
+scipy==1.16.2
+scikit-learn==1.7.2
+lightgbm==4.6.0
+
+# --- PostgreSQL (optional) -------------------------------------------------
+# Only needed when DATABASE_URL points at PostgreSQL; SQLite is the default and
+# is served by the standard library.
+psycopg[binary]==3.2.10
+
+# ---------------------------------------------------------------------------
+# Deliberately NOT included
+#
+#   torch      - no sequence/vision problem here justifies it. The signal is a
+#                low-dimensional tabular one where gradient-boosted trees win.
+#   SQLAlchemy - the persistence layer targets DB-API 2.0 directly so the
+#                default SQLite deployment has zero dependencies while the same
+#                SQL runs on PostgreSQL.
+#   ta-lib     - the indicators here are implemented and unit-tested in-repo,
+#                which avoids a C build dependency on every VPS.
+# ---------------------------------------------------------------------------
