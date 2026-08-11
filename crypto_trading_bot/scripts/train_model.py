@@ -35,6 +35,8 @@ from app.ml.dataset import build_dataset, class_distribution  # noqa: E402
 from app.ml.model_registry import ModelRegistry  # noqa: E402
 from app.ml.train import train_model  # noqa: E402
 from app.rtm.rtm_engine import analyse_rtm  # noqa: E402
+from app.scanner.instruments import parse_allowed_classes  # noqa: E402
+from app.scanner.universe import UniverseBuilder  # noqa: E402
 
 log = get_logger("train")
 
@@ -65,11 +67,50 @@ def feature_builder(history):
     return features
 
 
+async def _liquid_symbols(exchange, settings, count: int) -> list[str]:
+    """The ``count`` most liquid contracts the scanner would actually consider.
+
+    Reuses the live universe filter so training and inference see the same kind
+    of instrument.  A model trained on tokenised equities and then applied to
+    perpetual crypto has learned the wrong market.
+    """
+
+    contracts = await exchange.contracts()
+    tickers = await exchange.tickers()
+    universe = UniverseBuilder(
+        quote_currency=settings.quote_currency,
+        min_quote_volume=settings.min_24h_quote_volume,
+        max_spread_pct=settings.max_spread_pct,
+        blacklist=settings.symbol_blacklist,
+        max_symbols=max(count, 1),
+        allowed_classes=parse_allowed_classes(settings.allowed_instrument_classes),
+    )
+    candidates = universe.build(contracts, tickers)
+    ordered = sorted(candidates, key=lambda c: c.quote_volume, reverse=True)
+    return [c.symbol for c in ordered[:count]]
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Train the direction model")
     parser.add_argument("--symbols", default="BTCUSDT,ETHUSDT,SOLUSDT")
+    parser.add_argument(
+        "--top",
+        type=int,
+        default=0,
+        help=(
+            "ignore --symbols and train on the N most liquid tradable contracts. "
+            "Three symbols is far too narrow a sample to generalise from; 30-60 "
+            "is a more honest basis for a model the scanner applies to hundreds."
+        ),
+    )
     parser.add_argument("--timeframe", default="15m", choices=[t.value for t in Timeframe])
     parser.add_argument("--limit", type=int, default=6000)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=4,
+        help="parallel candle downloads (keep modest to respect rate limits)",
+    )
     parser.add_argument("--horizon", type=int, default=24, help="bars to the vertical barrier")
     parser.add_argument("--profit-atr", type=float, default=2.0)
     parser.add_argument("--loss-atr", type=float, default=1.0)
@@ -104,15 +145,31 @@ async def main() -> int:
         await exchange.connect()
 
     timeframe = Timeframe(args.timeframe)
-    symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
     samples = []
 
     try:
-        for symbol in symbols:
-            try:
-                candles = await exchange.candles(symbol, timeframe, limit=args.limit)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("skipping %s: %s", symbol, exc)
+        if args.top:
+            symbols = await _liquid_symbols(exchange, settings, args.top)
+            log.info("training on the %d most liquid contracts", len(symbols))
+        else:
+            symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+
+        semaphore = asyncio.Semaphore(max(1, args.concurrency))
+
+        async def fetch(symbol: str) -> tuple[str, list | None]:
+            async with semaphore:
+                try:
+                    return symbol, await exchange.candles(
+                        symbol, timeframe, limit=args.limit
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("skipping %s: %s", symbol, exc)
+                    return symbol, None
+
+        fetched = await asyncio.gather(*(fetch(s) for s in symbols))
+
+        for symbol, candles in fetched:
+            if not candles:
                 continue
             log.info("building dataset for %s (%d bars)...", symbol, len(candles))
             built = build_dataset(

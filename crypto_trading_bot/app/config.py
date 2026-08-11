@@ -26,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from app.compat import HAVE_YAML, yaml
+# ``app.domain`` imports nothing from the project, so this cannot cycle.
+from app.domain import Timeframe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -264,6 +266,23 @@ class Settings:
     deep_analysis_count: int = 15
     symbol_blacklist: tuple[str, ...] = ()
     quote_currency: str = "USDT"
+    #: How many symbols get the cheap single-timeframe screen before the
+    #: expensive multi-timeframe analysis.  0 disables the stage entirely and
+    #: deep analysis simply takes the top of the ticker-based pre-screen.
+    screen_count: int = 60
+    screen_timeframe: str = "1h"
+    #: Concurrency for each stage.  The screen is one fetch per symbol so it can
+    #: run wider than deep analysis, which is six.
+    screen_concurrency: int = 12
+    scanner_concurrency: int = 6
+    market_data_concurrency: int = 8
+    #: Instrument classes allowed into the universe.  CRYPTO is always allowed.
+    #: Add TOKENISED_EQUITY, INDEX, COMMODITY, FX or STABLECOIN to admit those,
+    #: or ALL to disable the filter.  They are excluded by default because they
+    #: often have no quotable order book and do not trade continuously.
+    allowed_instrument_classes: tuple[str, ...] = ("CRYPTO",)
+    #: How long a symbol is benched after its order book proves unusable.
+    order_book_bench_minutes: float = 30.0
 
     # --- execution / costs ----------------------------------------------
     taker_fee: float = 0.0006
@@ -561,6 +580,35 @@ def validate(settings: Settings) -> Settings:
         errors.append("min_rr must be >= 1.0; sub-1R targets are rejected")
     if settings.min_rr > 20:
         errors.append("min_rr > 20 is unrealistic and would block all trades")
+    if settings.deep_analysis_count < 1:
+        errors.append("deep_analysis_count must be >= 1")
+    if settings.deep_analysis_count > settings.max_symbols_to_scan:
+        errors.append(
+            "deep_analysis_count must not exceed max_symbols_to_scan "
+            f"({settings.deep_analysis_count} > {settings.max_symbols_to_scan})"
+        )
+    if settings.screen_count and settings.screen_count < settings.deep_analysis_count:
+        errors.append(
+            "screen_count must be 0 (disabled) or >= deep_analysis_count; "
+            "screening fewer symbols than are deep-analysed accomplishes nothing"
+        )
+    if settings.screen_count > settings.max_symbols_to_scan:
+        errors.append("screen_count must not exceed max_symbols_to_scan")
+    for name in ("screen_concurrency", "scanner_concurrency", "market_data_concurrency"):
+        value = getattr(settings, name)
+        if value < 1:
+            errors.append(f"{name} must be >= 1")
+        if value > 64:
+            errors.append(
+                f"{name} > 64 will trip the exchange rate limiter and get the "
+                "bot temporarily banned"
+            )
+    if settings.order_book_bench_minutes < 0:
+        errors.append("order_book_bench_minutes must be >= 0")
+    if settings.screen_timeframe not in {t.value for t in Timeframe}:
+        errors.append(
+            f"screen_timeframe={settings.screen_timeframe} is not a known timeframe"
+        )
     if not (0.0 <= settings.min_trade_quality <= 100.0):
         errors.append("min_trade_quality must be within [0, 100]")
     if settings.min_expected_value_r < 0:

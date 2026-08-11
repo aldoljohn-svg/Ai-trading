@@ -72,6 +72,7 @@ from app.position_manager.manager import (
 )
 from app.risk.portfolio_risk import PortfolioRisk
 from app.risk.risk_engine import RiskEngine
+from app.scanner.instruments import parse_allowed_classes
 from app.scanner.ranking import Opportunity, rank_opportunities
 from app.scanner.scanner import Scanner, SymbolAnalysis
 from app.scanner.universe import UniverseBuilder
@@ -176,6 +177,7 @@ class TradingEngine:
             self.exchange,
             store=CandleStore(),
             candle_repository=self.repositories.candles,
+            max_concurrency=settings.market_data_concurrency,
         )
 
         universe = UniverseBuilder(
@@ -184,6 +186,10 @@ class TradingEngine:
             max_spread_pct=settings.max_spread_pct,
             blacklist=settings.symbol_blacklist,
             max_symbols=settings.max_symbols_to_scan,
+            allowed_classes=parse_allowed_classes(
+                settings.allowed_instrument_classes
+            ),
+            bench_seconds=settings.order_book_bench_minutes * 60.0,
         )
 
         http_client = getattr(self.exchange, "http", None)
@@ -199,6 +205,10 @@ class TradingEngine:
             universe=universe,
             fundamentals=fundamentals,
             deep_analysis_count=settings.deep_analysis_count,
+            concurrency=settings.scanner_concurrency,
+            screen_count=settings.screen_count,
+            screen_timeframe=Timeframe(settings.screen_timeframe),
+            screen_concurrency=settings.screen_concurrency,
         )
 
         registry = ModelRegistry(

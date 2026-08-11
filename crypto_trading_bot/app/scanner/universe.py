@@ -10,10 +10,12 @@ funnel):
 1. contract inactive / not tradable
 2. wrong quote currency
 3. explicitly blacklisted
-4. no usable ticker
-5. 24h quote volume below the liquidity floor
-6. spread wider than the configured maximum
-7. degenerate price data (zero or crossed book)
+4. instrument class not allowed (tokenised equities, indices, FX, …)
+5. temporarily benched for having no usable order book
+6. no usable ticker
+7. 24h quote volume below the liquidity floor
+8. spread wider than the configured maximum
+9. degenerate price data (zero or crossed book)
 
 Survivors are scored on volume, volatility and movement.  That pre-screen score
 only decides *who gets analysed*, never who gets traded.
@@ -22,14 +24,22 @@ only decides *who gets analysed*, never who gets traded.
 from __future__ import annotations
 
 import math
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Sequence
 
 from app.domain import ContractSpec, Ticker
 from app.logger import get_logger
+from app.scanner.instruments import InstrumentClass, classify_symbol
 
 log = get_logger(__name__)
+
+#: How long a symbol stays benched after its order book proves unusable.
+#: Long enough that a dead instrument stops costing a deep-analysis slot every
+#: minute, short enough that a symbol recovering from a brief outage returns
+#: without a restart.
+BOOK_BENCH_SECONDS: float = 1800.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +87,8 @@ class UniverseBuilder:
         max_volatility_pct: float = 0.60,
         blacklist: Sequence[str] = (),
         max_symbols: int = 100,
+        allowed_classes: Iterable[InstrumentClass] = (InstrumentClass.CRYPTO,),
+        bench_seconds: float = BOOK_BENCH_SECONDS,
     ) -> None:
         self.quote_currency = quote_currency.upper()
         self.min_quote_volume = min_quote_volume
@@ -85,7 +97,54 @@ class UniverseBuilder:
         self.max_volatility_pct = max_volatility_pct
         self.blacklist = {s.upper() for s in blacklist}
         self.max_symbols = max_symbols
+        self.allowed_classes = frozenset(allowed_classes) or frozenset(
+            {InstrumentClass.CRYPTO}
+        )
+        self.bench_seconds = bench_seconds
         self.last_report = UniverseReport()
+        #: symbol -> timestamp at which the bench expires.
+        self._benched: dict[str, float] = {}
+
+    # -- order book bench --------------------------------------------------
+
+    def bench(self, symbol: str, reason: str = "", now: float | None = None) -> None:
+        """Temporarily exclude a symbol whose order book is unusable.
+
+        Called by the scanner when a depth fetch fails or comes back empty.
+        Without this, an instrument that never has a book -- a tokenised equity
+        outside market hours, a delisted contract still returning a ticker --
+        consumes a deep-analysis slot on every single cycle and fills the
+        decision journal with the same execution-risk rejection.
+        """
+
+        now = now if now is not None else time.time()
+        symbol = symbol.upper()
+        first_time = symbol not in self._benched
+        self._benched[symbol] = now + self.bench_seconds
+        if first_time:
+            log.info(
+                "benching %s for %.0f min: %s",
+                symbol,
+                self.bench_seconds / 60,
+                reason or "no usable order book",
+            )
+
+    def unbench(self, symbol: str) -> None:
+        self._benched.pop(symbol.upper(), None)
+
+    def is_benched(self, symbol: str, now: float | None = None) -> bool:
+        now = now if now is not None else time.time()
+        expiry = self._benched.get(symbol.upper())
+        if expiry is None:
+            return False
+        if expiry <= now:
+            del self._benched[symbol.upper()]
+            return False
+        return True
+
+    def benched_symbols(self, now: float | None = None) -> list[str]:
+        now = now if now is not None else time.time()
+        return sorted(s for s, expiry in self._benched.items() if expiry > now)
 
     def build(
         self,
@@ -94,6 +153,7 @@ class UniverseBuilder:
     ) -> list[ScanCandidate]:
         report = UniverseReport(considered=len(contracts))
         candidates: list[ScanCandidate] = []
+        now = time.time()
 
         for symbol, spec in contracts.items():
             if not spec.active:
@@ -104,6 +164,15 @@ class UniverseBuilder:
                 continue
             if symbol in self.blacklist:
                 report.rejections["blacklisted"] += 1
+                continue
+
+            instrument = classify_symbol(symbol, self.quote_currency)
+            if instrument not in self.allowed_classes:
+                report.rejections[instrument.description] += 1
+                continue
+
+            if self.is_benched(symbol, now):
+                report.rejections["no usable order book"] += 1
                 continue
 
             ticker = tickers.get(symbol)

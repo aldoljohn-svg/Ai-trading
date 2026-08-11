@@ -474,9 +474,24 @@ parameters do not generalise — do not trade that configuration.**
 ## 13. Training the model
 
 ```bash
+# Narrow — fine for a plumbing check, too small to generalise from
 docker compose run --rm bot python scripts/train_model.py \
     --symbols BTCUSDT,ETHUSDT,SOLUSDT --limit 6000
+
+# Broad — the 40 most liquid tradable contracts, chosen by the same universe
+# filter the live scanner uses
+docker compose run --rm bot python scripts/train_model.py \
+    --top 40 --limit 8000 --concurrency 4
 ```
+
+**Use `--top`.** Three symbols is a very narrow sample to learn from when the
+scanner then applies the model to hundreds. `--top N` picks the N most liquid
+contracts through the *same* universe filter as the live scanner, so the model
+is trained on the kind of instrument it will actually be asked about — not on
+tokenised equities it will never see at inference time.
+
+Expect `--top 40 --limit 8000` to take a while and produce on the order of tens
+of thousands of labelled samples rather than a few thousand. That is the point.
 
 Labels use the triple-barrier method (upper barrier at +2 ATR, lower at −1 ATR,
 vertical at 24 bars) with the pessimistic tie-break. Features are rebuilt bar by
@@ -621,11 +636,47 @@ crontab -e
 
 ### Scanner — picking what to look at
 
-One bulk ticker call ranks every contract on liquidity (40%), healthy volatility
-(25%, peaking around 6% daily range and penalised when extreme), 24h movement
-(20%) and spread tightness (15%). Only the top `DEEP_ANALYSIS_COUNT` symbols get
-expensive multi-timeframe analysis. That pre-screen decides *who gets analysed*,
-never who gets traded.
+Three stages, each narrowing the field and each more expensive than the last.
+
+**1. Pre-screen — every contract, one bulk ticker call.** Ranks on liquidity
+(40%), healthy volatility (25%, peaking around 6% daily range and penalised when
+extreme), 24h movement (20%) and spread tightness (15%). Keeps
+`MAX_SYMBOLS_TO_SCAN`.
+
+This stage also drops instruments the bot has no business trading. MEXC's
+futures list is not only crypto: it carries tokenised equities
+(`SNDKSTOCKUSDT`), leveraged equity ETFs (`SOXLUSDT`), commodities (`XAUUSDT`),
+FX and stablecoin pairs. They report a 24h volume so they survive a naive
+liquidity filter, but they often have no quotable order book, they gap between
+sessions instead of trading continuously, and the analytical stack assumes a
+24/7 order-driven market. `ALLOWED_INSTRUMENT_CLASSES` controls this; anything
+the classifier does not recognise stays as crypto rather than being silently
+dropped.
+
+A symbol whose order book cannot be fetched, or comes back empty, is **benched**
+for `ORDER_BOOK_BENCH_MINUTES`. Without that, a dead instrument consumes a
+deep-analysis slot every single cycle and produces the same execution-risk
+rejection forever.
+
+**2. Screen — one timeframe per symbol.** A ticker tells you a coin is liquid;
+it says nothing about whether anything is *happening* on the chart. This stage
+pulls a single timeframe (`SCREEN_TIMEFRAME`, default 1h) for the top
+`SCREEN_COUNT` symbols and scores trend (35%), momentum (25%), volatility fit
+(20%), volatility expansion (10%) and the pre-screen rank (10%).
+
+One fetch per symbol instead of six means several times as many symbols can be
+examined for the same budget. Set `SCREEN_COUNT=0` to skip the stage.
+
+**3. Deep — the top `DEEP_ANALYSIS_COUNT`.** Six timeframes, structure, ICT,
+RTM, regime, fundamentals and the order book.
+
+Candle data is cached until the next bar closes, so after the first cycle most
+of this costs nothing — a 1h screen series refetches once an hour, a daily
+series once a day. Expect the **first** cycle after a restart to be slow when
+these numbers are large; that is warmup, not a hang.
+
+None of these three stages decides *who gets traded*. They decide who gets
+attention. Every gate downstream still applies in full.
 
 ### Scoring
 
@@ -1030,7 +1081,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       431 tests
+├── tests/                       483 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

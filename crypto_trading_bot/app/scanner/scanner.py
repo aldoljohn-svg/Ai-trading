@@ -127,6 +127,36 @@ class TimeframeAnalysis:
 
 
 @dataclass(slots=True)
+class ScreenResult:
+    """A cheap, single-timeframe read used to rank candidates for deep analysis."""
+
+    candidate: ScanCandidate
+    score: float
+    trend: float = 0.0
+    momentum: float = 0.0
+    volatility: float = 0.0
+    expansion: float = 0.0
+    direction: int = 0
+    note: str = ""
+
+    @property
+    def symbol(self) -> str:
+        return self.candidate.symbol
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "symbol": self.symbol,
+            "score": round(self.score, 2),
+            "trend": round(self.trend, 1),
+            "momentum": round(self.momentum, 1),
+            "volatility": round(self.volatility, 1),
+            "expansion": round(self.expansion, 1),
+            "direction": self.direction,
+            "note": self.note,
+        }
+
+
+@dataclass(slots=True)
 class SymbolAnalysis:
     """Everything known about one symbol at one moment in time."""
 
@@ -241,15 +271,22 @@ class Scanner:
         deep_analysis_count: int = 15,
         concurrency: int = 6,
         timeframes: Sequence[Timeframe] = ANALYSIS_TIMEFRAMES,
+        screen_count: int = 0,
+        screen_timeframe: Timeframe = Timeframe.H1,
+        screen_concurrency: int = 12,
     ) -> None:
         self.market_data = market_data
         self.universe = universe
         self.fundamentals = fundamentals
         self.deep_analysis_count = deep_analysis_count
         self.timeframes = tuple(timeframes)
+        self.screen_count = screen_count
+        self.screen_timeframe = screen_timeframe
         self._semaphore = asyncio.Semaphore(concurrency)
+        self._screen_semaphore = asyncio.Semaphore(screen_concurrency)
         self.last_scan_ts = 0.0
         self.last_candidates: list[ScanCandidate] = []
+        self.last_screened: list[ScreenResult] = []
         self.last_errors: dict[str, str] = {}
 
     # -- stage 1 ----------------------------------------------------------
@@ -261,6 +298,132 @@ class Scanner:
         self.last_candidates = candidates
         self.last_scan_ts = time.time()
         return candidates
+
+    # -- stage 1.5: cheap screen -------------------------------------------
+
+    async def screen(
+        self, candidates: Sequence[ScanCandidate]
+    ) -> list[ScreenResult]:
+        """Rank a wide set of symbols using one timeframe instead of six.
+
+        The pre-screen only sees a ticker: volume, spread, 24h range.  That is
+        enough to reject the obviously untradable but says nothing about
+        whether anything is *happening* on the chart right now, so the top of
+        that ranking is dominated by whatever is permanently liquid rather than
+        whatever is interesting today.
+
+        This stage pulls a single timeframe and asks a narrower question: is
+        there a trend worth trading, is momentum behind it, is volatility
+        expanding, and is price at a decision point?  One fetch per symbol
+        instead of six means several times as many symbols can be examined for
+        the same budget, and the candle cache makes it nearly free on repeat
+        cycles.
+
+        The score decides who gets deep analysis.  It never decides who gets
+        traded -- every gate downstream still applies in full.
+        """
+
+        selected = list(candidates)[: self.screen_count or len(candidates)]
+        results = await asyncio.gather(
+            *(self._screen_symbol(candidate) for candidate in selected),
+            return_exceptions=True,
+        )
+
+        out: list[ScreenResult] = []
+        for candidate, result in zip(selected, results):
+            if isinstance(result, BaseException):
+                # A screen failure is not worth logging per symbol; the symbol
+                # simply keeps its pre-screen ranking.
+                out.append(
+                    ScreenResult(
+                        candidate=candidate,
+                        score=candidate.prescreen_score * 0.5,
+                        note=f"screen unavailable: {result}",
+                    )
+                )
+                continue
+            out.append(result)
+
+        out.sort(key=lambda r: r.score, reverse=True)
+        self.last_screened = out
+        return out
+
+    async def _screen_symbol(self, candidate: ScanCandidate) -> ScreenResult:
+        async with self._screen_semaphore:
+            candles = await self.market_data.candles(
+                candidate.symbol,
+                self.screen_timeframe,
+                limit=240,
+                min_length=200,
+            )
+
+        indicators = compute_indicators(candles)
+        slopes = compute_slopes(indicators, [c.close for c in candles])
+
+        atr = indicators.last_atr or 0.0
+        close = indicators.close or candles[-1].close
+        adx = indicators.last_adx or 0.0
+        rsi = indicators.last_rsi or 50.0
+        stack = indicators.ma_stack
+
+        # --- trend: a directional stack confirmed by a linear Average line ---
+        trend = 0.0
+        if stack != 0:
+            trend = 60.0 + 40.0 * min(slopes.trend_quality, 1.0)
+        elif slopes.aligned_bullish or slopes.aligned_bearish:
+            trend = 45.0
+
+        # --- momentum: ADX for strength, RSI for extension -------------------
+        momentum = min(adx / 40.0, 1.0) * 100.0
+        # A market already stretched has less room left, so temper the score.
+        if rsi > 75 or rsi < 25:
+            momentum *= 0.7
+
+        # --- volatility fit: enough to pay costs, not so much stops break ----
+        atr_pct = (atr / close) if close > 0 else 0.0
+        if atr_pct <= 0:
+            volatility = 0.0
+        elif atr_pct < 0.002:
+            volatility = 100.0 * atr_pct / 0.002        # too quiet to pay costs
+        elif atr_pct <= 0.03:
+            volatility = 100.0
+        else:
+            volatility = max(0.0, 100.0 * (1.0 - (atr_pct - 0.03) / 0.07))
+
+        # --- expansion: bandwidth widening after a squeeze is where moves start
+        bandwidth = indicators.last_bandwidth or 0.0
+        history = [b for b in indicators.bb_bandwidth[-60:] if b is not None]
+        expansion = 0.0
+        if history and bandwidth > 0:
+            ordered = sorted(history)
+            rank = sum(1 for b in ordered if b <= bandwidth) / len(ordered)
+            # Both a fresh squeeze and a fresh expansion are interesting; the
+            # dead middle is not.
+            expansion = 100.0 * abs(rank - 0.5) * 2.0
+
+        score = (
+            0.35 * trend
+            + 0.25 * momentum
+            + 0.20 * volatility
+            + 0.10 * expansion
+            + 0.10 * candidate.prescreen_score
+        )
+
+        direction = stack if stack != 0 else (1 if slopes.average_slope > 0 else -1)
+        note = (
+            f"{'up' if direction > 0 else 'down'} trend {trend:.0f}, "
+            f"ADX {adx:.0f}, ATR {atr_pct:.2%}"
+        )
+        return ScreenResult(
+            candidate=candidate,
+            score=score,
+            trend=trend,
+            momentum=momentum,
+            volatility=volatility,
+            expansion=expansion,
+            direction=direction,
+            note=note,
+        )
 
     # -- stage 2 ----------------------------------------------------------
 
@@ -360,9 +523,20 @@ class Scanner:
 
             order_book = None
             try:
-                order_book = await self.market_data.order_book(symbol, depth=20)
+                fetched = await self.market_data.order_book(symbol, depth=20)
             except Exception as exc:  # noqa: BLE001 - depth is optional context
                 errors.append(f"order book: {exc}")
+                self.universe.bench(symbol, f"depth fetch failed: {exc}")
+            else:
+                if fetched.bids and fetched.asks:
+                    order_book = fetched
+                    self.universe.unbench(symbol)
+                else:
+                    # An empty book is not a transient error, it means nothing
+                    # is quoting.  Bench it rather than paying for the analysis
+                    # again next cycle only to reject it for the same reason.
+                    errors.append("order book is empty")
+                    self.universe.bench(symbol, "order book came back empty")
 
             return SymbolAnalysis(
                 symbol=symbol,
@@ -386,6 +560,17 @@ class Scanner:
         if not candidates:
             log.warning("scanner produced no candidates: %s", self.universe.last_report.summary())
             return []
+
+        if self.screen_count:
+            screened = await self.screen(candidates)
+            candidates = [result.candidate for result in screened]
+            log.info(
+                "screened %d symbols on %s, deep-analysing the top %d",
+                len(screened),
+                self.screen_timeframe.value,
+                min(self.deep_analysis_count, len(candidates)),
+            )
+
         tickers = await self.market_data.all_tickers()
         return await self.deep_analyse(candidates, tickers)
 
