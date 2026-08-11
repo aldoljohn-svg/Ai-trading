@@ -168,8 +168,10 @@ MAX_PORTFOLIO_RISK=0.02         # 2% correlation-adjusted open risk
 MAX_OPEN_POSITIONS=3
 MAX_LEVERAGE=3
 MIN_CONFIDENCE=0.70
-MIN_RR=2.0
+MIN_RR=1.7                      # break-even win rate 37%; scaled up by regime
 MAX_SYMBOLS_TO_SCAN=100
+SCREEN_COUNT=60                 # cheap single-timeframe screen before deep analysis
+DEEP_ANALYSIS_COUNT=15
 SCANNER_INTERVAL_SECONDS=60
 ```
 
@@ -501,8 +503,32 @@ contracts through the *same* universe filter as the live scanner, so the model
 is trained on the kind of instrument it will actually be asked about — not on
 tokenised equities it will never see at inference time.
 
-Expect `--top 40 --limit 8000` to take a while and produce on the order of tens
-of thousands of labelled samples rather than a few thousand. That is the point.
+**Install the scientific stack first.** Without it the trainer falls back to a
+pure-Python softmax regression — a *linear* model on a problem that is not
+linear. `requirements.txt` brings LightGBM, which is the right tool for a
+low-dimensional tabular signal:
+
+```bash
+pip install -r requirements.txt
+python -c "import lightgbm; print('ok')"
+```
+
+Check `backend` in the output. `lightgbm` is what you want; `softmax-pure-python`
+means the stack is missing and the result is close to a floor, not a ceiling.
+
+**`--limit` pages past the exchange cap.** MEXC returns at most 2000 bars per
+request, so deep history is fetched in pages. Sample yield per symbol is
+`(bars − 400 warmup − horizon) ÷ stride`: 2000 bars gives ~394 samples, 8000
+gives ~1894. Expect `--top 40 --limit 8000` to take 20–45 minutes and produce
+tens of thousands of labelled samples.
+
+**A rejected model is the system working.** The trainer refuses anything that
+does not beat the majority-class baseline on both accuracy and Brier score,
+because an uninformative model that ships is worse than no model — the signal
+engine would weight its noise. The bot keeps running on rules alone, which is
+the safe outcome. If a model is rejected, try more data or a different horizon;
+if it keeps failing, that is a real finding about the label, not a bug to work
+around.
 
 Labels use the triple-barrier method (upper barrier at +2 ATR, lower at −1 ATR,
 vertical at 24 bars) with the pessimistic tie-break. Features are rebuilt bar by
@@ -1094,7 +1120,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       499 tests
+├── tests/                       512 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

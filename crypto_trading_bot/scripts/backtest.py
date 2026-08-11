@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from app.backtest.engine import BacktestConfig, BacktestEngine  # noqa: E402
 from app.backtest.walk_forward import walk_forward  # noqa: E402
 from app.config import ConfigError, get_settings  # noqa: E402
+from app.data.history import fetch_history  # noqa: E402
 from app.database.database import get_database  # noqa: E402
 from app.database.repositories import Repositories  # noqa: E402
 from app.domain import Timeframe  # noqa: E402
@@ -41,8 +42,15 @@ async def load_data(exchange, symbols, execution_tf, limit):
     for symbol in symbols:
         series = {}
         for timeframe in (execution_tf, *CONTEXT):
+            # Context timeframes need far fewer bars than the execution one to
+            # cover the same span, and asking for 25000 daily bars would page
+            # pointlessly back to before the asset existed.
+            scale = execution_tf.seconds / timeframe.seconds
+            wanted = max(200, int(limit * scale)) if scale < 1 else limit
             try:
-                candles = await exchange.candles(symbol, timeframe, limit=limit)
+                candles = await fetch_history(
+                    exchange, symbol, timeframe, limit=wanted
+                )
             except Exception as exc:  # noqa: BLE001
                 log.warning("could not load %s %s: %s", symbol, timeframe.value, exc)
                 continue

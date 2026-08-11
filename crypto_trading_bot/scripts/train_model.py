@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.config import ConfigError, get_settings  # noqa: E402
+from app.data.history import fetch_history_many  # noqa: E402
 from app.database.database import get_database  # noqa: E402
 from app.database.repositories import Repositories  # noqa: E402
 from app.domain import Timeframe  # noqa: E402
@@ -154,23 +155,28 @@ async def main() -> int:
         else:
             symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
 
-        semaphore = asyncio.Semaphore(max(1, args.concurrency))
+        # Exchanges cap one request at 2000 bars; fetch_history pages backwards
+        # so --limit means what it says instead of being silently truncated.
+        log.info(
+            "downloading up to %d %s bars for %d symbols...",
+            args.limit,
+            timeframe.value,
+            len(symbols),
+        )
+        series = await fetch_history_many(
+            exchange, symbols, timeframe, args.limit, concurrency=args.concurrency
+        )
 
-        async def fetch(symbol: str) -> tuple[str, list | None]:
-            async with semaphore:
-                try:
-                    return symbol, await exchange.candles(
-                        symbol, timeframe, limit=args.limit
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("skipping %s: %s", symbol, exc)
-                    return symbol, None
+        short = {s: len(c) for s, c in series.items() if len(c) < args.limit * 0.6}
+        if short:
+            log.warning(
+                "%d symbol(s) returned much less history than requested "
+                "(recent listings): %s",
+                len(short),
+                ", ".join(f"{s}={n}" for s, n in sorted(short.items())[:6]),
+            )
 
-        fetched = await asyncio.gather(*(fetch(s) for s in symbols))
-
-        for symbol, candles in fetched:
-            if not candles:
-                continue
+        for symbol, candles in sorted(series.items()):
             log.info("building dataset for %s (%d bars)...", symbol, len(candles))
             built = build_dataset(
                 symbol=symbol,
