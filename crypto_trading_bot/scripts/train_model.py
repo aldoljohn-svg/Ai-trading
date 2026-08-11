@@ -342,6 +342,7 @@ async def main() -> int:
         name=args.name or settings.ml_model_name,
         min_rows=settings.ml_min_training_rows,
         kind=args.mode,
+        reward=args.profit_atr / max(args.loss_atr, 1e-9),
     )
 
     print()

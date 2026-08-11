@@ -339,6 +339,11 @@ class Settings:
     auto_train_bars: int = 6000
     auto_train_timeframe: str = "15m"
     auto_train_horizon: int = 24
+    #: Barrier geometry the labels are built with.  The ratio is also the payoff
+    #: a candidate must clear break-even at, so these two and the take-profit
+    #: ladder should describe the same trade.
+    auto_train_profit_atr: float = 2.0
+    auto_train_loss_atr: float = 1.0
 
     # --- paper -----------------------------------------------------------
     paper_starting_equity: float = 1000.0
@@ -631,6 +636,14 @@ def validate(settings: Settings) -> Settings:
             errors.append("auto_train_bars must be >= 1000 to build a usable dataset")
         if settings.auto_train_horizon < 1:
             errors.append("auto_train_horizon must be >= 1")
+        if settings.auto_train_loss_atr <= 0:
+            errors.append("auto_train_loss_atr must be > 0")
+        if settings.auto_train_profit_atr <= settings.auto_train_loss_atr:
+            errors.append(
+                "auto_train_profit_atr must exceed auto_train_loss_atr; a payoff "
+                "of 1:1 or worse teaches the model to accept trades the risk "
+                "engine would reject"
+            )
         if settings.auto_train_timeframe not in {t.value for t in Timeframe}:
             errors.append(
                 f"auto_train_timeframe={settings.auto_train_timeframe} is not a "

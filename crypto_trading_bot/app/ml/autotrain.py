@@ -402,6 +402,7 @@ class AutoTrainer:
             name=settings.ml_model_name,
             min_rows=settings.ml_min_training_rows,
             kind="meta",
+            reward=settings.auto_train_profit_atr / settings.auto_train_loss_atr,
         )
         cycle.metrics = dict(result.metrics)
         cycle.challenger_lift = float(result.metrics.get("lift", 0.0) or 0.0)
@@ -560,6 +561,8 @@ class AutoTrainer:
                     timeframe=timeframe,
                     candles=candles,
                     horizon=settings.auto_train_horizon,
+                    profit_atr=settings.auto_train_profit_atr,
+                    loss_atr=settings.auto_train_loss_atr,
                     warmup=400,
                     stride=4,
                     stats=stats,

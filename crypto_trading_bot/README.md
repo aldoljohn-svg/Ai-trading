@@ -547,8 +547,22 @@ It also matches how the output is already used: the signal engine reads
 
 A meta model is judged on whether it can **rank** trades, not on argmax
 accuracy — accuracy is blind on an imbalanced binary problem. The acceptance
-test compares the win rate of its top-scoring fifth against its bottom fifth and
-requires a lift of at least 1.15.
+test compares its top-scoring fifth against its bottom fifth on three counts:
+
+1. **A real edge** — lift of at least 1.10 between the slices.
+2. **Not luck** — a two-proportion z of at least 1.96. A fixed lift threshold
+   ignores sample size, which is wrong in both directions: it waves noise
+   through on a few hundred rows and rejects a genuine edge on tens of
+   thousands.
+3. **Worth trading** — the top slice must clear break-even *after costs*. This
+   is the check that matters most, and the one most easily forgotten:
+   filtering a negative edge harder produces a smaller negative edge, not a
+   positive one. A model can rank trades detectably better than chance and
+   still pick only losers.
+
+Break-even is `1 / (1 + payoff)` — 33.3% at 2:1 — and the assumed round-trip
+cost is 0.09R. When a model is refused for reason 3 the message says so
+explicitly, because at that point the setup is the problem, not the model.
 
 `--mode direction` still trains the original three-class model.
 
@@ -1213,7 +1227,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       573 tests
+├── tests/                       579 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

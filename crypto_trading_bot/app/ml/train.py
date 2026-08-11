@@ -200,6 +200,7 @@ def train_model(
     test_fraction: float = 0.25,
     prefer_backend: str | None = None,
     kind: str = "direction",
+    reward: float = 2.0,
 ) -> TrainingResult:
     """Train, calibrate, evaluate and (if it earns it) return an artefact.
 
@@ -207,6 +208,11 @@ def train_model(
     LONG/SHORT/NO_TRADE model; ``meta`` is the binary "does the rules' chosen
     side reach its target first" model, which is scored on whether it can *rank*
     trades rather than on argmax accuracy.
+
+    ``reward`` is the payoff ratio the labels were built with (profit barrier
+    divided by loss barrier).  A meta model is judged partly on whether its
+    best-ranked trades clear break-even at that payoff, so getting this wrong
+    would grade the model against a trade it was never taught.
     """
 
     if kind == "meta":
@@ -275,6 +281,7 @@ def train_model(
             metrics=metrics,
             distribution=distribution,
             name=name,
+            reward=reward,
         )
 
     # --- calibration on the held-out slice (one-vs-rest per direction) ---
@@ -349,14 +356,23 @@ def train_model(
     return TrainingResult(artifact=artifact, metrics=metrics, accepted=True, reason="ok")
 
 
-#: A meta model earns its place by *ranking* trades, so the top slice of its
-#: predictions must win meaningfully more often than the bottom slice.  1.15 is
-#: a modest bar -- a 15% relative edge in win rate between best and worst -- but
-#: it is a real one, and noise does not clear it on thousands of test rows.
-_MIN_META_LIFT = 1.15
+#: Minimum relative edge between the best and worst slice.  Kept as a floor so
+#: a trivially small but statistically detectable difference -- which large
+#: samples will always find -- cannot pass on significance alone.
+_MIN_META_LIFT = 1.10
+
+#: The separation must also be unlikely to be luck.  A fixed lift threshold
+#: ignores sample size, which is wrong in both directions: it waves through
+#: noise on a few hundred rows and rejects a genuine edge on tens of thousands.
+_MIN_META_Z = 1.96          # ~95% two-sided
 
 #: Size of the top/bottom slices used for that comparison.
 _META_TAIL = 0.2
+
+#: Round-trip cost of a trade, expressed in R against a 1R stop: taker fees
+#: both ways, the spread, and slippage.  Deliberately not optimistic -- a model
+#: that only looks profitable when trading is free is not profitable.
+_ASSUMED_COST_R = 0.09
 
 
 def _decile_lift(scores: Sequence[float], labels: Sequence[int]) -> dict[str, float]:
@@ -378,12 +394,34 @@ def _decile_lift(scores: Sequence[float], labels: Sequence[int]) -> dict[str, fl
     # Guard the ratio: a bottom slice that never wins would divide by zero.
     lift = top_rate / bottom_rate if bottom_rate > 0 else (top_rate / 1e-6 if top_rate else 0.0)
 
+    # Is the gap bigger than sampling noise?  A fixed lift threshold cannot
+    # answer that, because the same lift means very different things on 200
+    # rows and on 20,000.
+    #
+    # The rates are nudged off 0 and 1 (Haldane-Anscombe) before the variance is
+    # taken.  Without it a perfectly separating model has zero variance in both
+    # slices, the z-score divides by zero, and the best possible result would be
+    # rejected as indistinguishable from noise.
+    top_adj = (sum(label for _, label in top) + 0.5) / (size + 1)
+    bottom_adj = (sum(label for _, label in bottom) + 0.5) / (size + 1)
+    variance = (
+        top_adj * (1 - top_adj) / size + bottom_adj * (1 - bottom_adj) / size
+    )
+    z = (top_adj - bottom_adj) / math.sqrt(variance) if variance > 0 else 0.0
+
     return {
         "top_win_rate": round(top_rate, 4),
         "bottom_win_rate": round(bottom_rate, 4),
         "lift": round(min(lift, 99.0), 3),
+        "separation_z": round(z, 2),
         "slice_size": size,
     }
+
+
+def expectancy_r(win_rate: float, reward: float, risk: float = 1.0) -> float:
+    """Expected R per trade at this win rate, before costs."""
+
+    return win_rate * reward - (1.0 - win_rate) * risk
 
 
 def _finish_meta(
@@ -396,6 +434,7 @@ def _finish_meta(
     metrics: dict[str, Any],
     distribution: dict[str, int],
     name: str,
+    reward: float = 2.0,
 ) -> TrainingResult:
     """Calibrate, score and judge a binary meta model."""
 
@@ -425,22 +464,57 @@ def _finish_meta(
     lift_metrics = _decile_lift(calibrated, win_labels)
     metrics.update(lift_metrics)
 
-    beats_baseline = metrics["brier_win"] <= baseline_brier * 1.01
-    separates = lift_metrics["lift"] >= _MIN_META_LIFT
+    # --- would trading the model's best slice actually make money? --------
+    #
+    # Statistical separation is necessary but nowhere near sufficient.  A model
+    # can rank trades detectably better than chance and still pick only losers,
+    # which is exactly what happens when the underlying setup sits near
+    # break-even: filtering a negative edge harder produces a smaller negative
+    # edge, not a positive one.
+    top_expectancy = expectancy_r(lift_metrics["top_win_rate"], reward)
+    net_expectancy = top_expectancy - _ASSUMED_COST_R
+    metrics["reward_r"] = round(reward, 3)
+    metrics["base_expectancy_r"] = round(expectancy_r(base_rate, reward), 4)
+    metrics["top_expectancy_r"] = round(top_expectancy, 4)
+    metrics["net_expectancy_r"] = round(net_expectancy, 4)
+    metrics["assumed_cost_r"] = _ASSUMED_COST_R
+    metrics["break_even_win_rate"] = round(1.0 / (1.0 + reward), 4)
 
-    if not (beats_baseline and separates):
+    beats_baseline = metrics["brier_win"] <= baseline_brier * 1.01
+    separates = (
+        lift_metrics["lift"] >= _MIN_META_LIFT
+        and lift_metrics["separation_z"] >= _MIN_META_Z
+    )
+    profitable = net_expectancy > 0
+
+    if not (beats_baseline and separates and profitable):
+        reasons: list[str] = []
+        if not separates:
+            reasons.append(
+                f"cannot rank trades (top {lift_metrics['top_win_rate']:.1%} vs "
+                f"bottom {lift_metrics['bottom_win_rate']:.1%}, lift "
+                f"{lift_metrics['lift']:.2f}, z {lift_metrics['separation_z']:.2f})"
+            )
+        elif not profitable:
+            reasons.append(
+                f"ranks trades genuinely (top {lift_metrics['top_win_rate']:.1%} vs "
+                f"bottom {lift_metrics['bottom_win_rate']:.1%}, z "
+                f"{lift_metrics['separation_z']:.2f}) but even its best slice "
+                f"loses money: {top_expectancy:+.4f}R gross, "
+                f"{net_expectancy:+.4f}R after {_ASSUMED_COST_R}R costs. "
+                f"Break-even needs {metrics['break_even_win_rate']:.1%} at this "
+                f"{reward:.1f}:1 payoff; the setup itself is the problem, not "
+                "the model"
+            )
+        if not beats_baseline:
+            reasons.append(
+                f"Brier {metrics['brier_win']:.4f} vs baseline {baseline_brier:.4f}"
+            )
         return TrainingResult(
             artifact=None,
             metrics=metrics,
             accepted=False,
-            reason=(
-                "meta model does not usefully rank trades "
-                f"(top {lift_metrics['top_win_rate']:.1%} vs bottom "
-                f"{lift_metrics['bottom_win_rate']:.1%} win rate, lift "
-                f"{lift_metrics['lift']:.2f} against the {_MIN_META_LIFT:.2f} "
-                f"minimum; Brier {metrics['brier_win']:.4f} vs "
-                f"{baseline_brier:.4f}) - refusing to deploy it"
-            ),
+            reason="meta model refused: " + "; ".join(reasons),
         )
 
     artifact = ModelArtifact(

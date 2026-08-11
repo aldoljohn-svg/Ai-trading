@@ -31,7 +31,7 @@ from app.ml.meta import (
 )
 from app.ml.model_registry import ModelArtifact, ModelRegistry
 from app.ml.predict import Predictor
-from app.ml.train import _decile_lift, train_model
+from app.ml.train import _decile_lift, expectancy_r, train_model
 from app.scanner.scanner import directional_bias
 
 from tests.conftest import make_candles
@@ -274,6 +274,101 @@ class TestSharedDirection:
 # ===========================================================================
 # training and acceptance
 # ===========================================================================
+
+
+class TestEconomicAcceptance:
+    """A model can rank trades genuinely and still be worth nothing.
+
+    Filtering a negative edge harder produces a smaller negative edge, not a
+    positive one.  These pin the check that says so out loud, drawn from a real
+    training run: 32.3% base win rate at a 2:1 payoff, where break-even is
+    33.3%.
+    """
+
+    def _slices(self, top: float, bottom: float, n: int = 8198):
+        """Scores and labels that realise the given tail win rates exactly."""
+
+        size = int(n * 0.2)
+        scores = [i / n for i in range(n)]
+        labels = [0] * n
+        for i in range(size):                       # bottom tail
+            if i < round(bottom * size):
+                labels[i] = 1
+        for i in range(n - size, n):                # top tail
+            if i - (n - size) < round(top * size):
+                labels[i] = 1
+        return scores, labels
+
+    def test_the_z_score_scales_with_sample_size(self):
+        """A fixed lift threshold cannot tell 200 rows from 20,000."""
+
+        small = _decile_lift(*self._slices(0.34, 0.29, n=400))
+        large = _decile_lift(*self._slices(0.34, 0.29, n=20000))
+        assert large["lift"] == pytest.approx(small["lift"], abs=0.05)
+        assert large["separation_z"] > small["separation_z"]
+
+    def test_break_even_is_the_payoff_reciprocal(self):
+        assert expectancy_r(1 / 3, 2.0) == pytest.approx(0.0, abs=1e-9)
+        assert expectancy_r(0.25, 3.0) == pytest.approx(0.0, abs=1e-9)
+
+    def test_a_real_but_unprofitable_edge_is_refused(self):
+        """The exact shape of a real run: significant, still loses money."""
+
+        top, bottom = 0.3368, 0.2935
+        metrics = _decile_lift(*self._slices(top, bottom))
+        assert metrics["separation_z"] >= 1.96, "the separation is genuine"
+
+        gross = expectancy_r(top, 2.0)
+        assert gross > 0, "it beats break-even before costs"
+        assert gross - 0.09 < 0, "but not after costs"
+
+    def test_a_profitable_edge_clears(self):
+        top = 0.42
+        assert expectancy_r(top, 2.0) - 0.09 > 0
+
+    def test_the_rejection_explains_which_check_failed(self):
+        import random
+        from app.ml.dataset import LabelledSample
+
+        rng = random.Random(5)
+        samples = []
+        for i in range(4000):
+            # A genuinely rankable but unprofitable setup: the base rate sits
+            # just under break-even and the signal moves it barely above.
+            signal = rng.random()
+            win = rng.random() < (0.30 + 0.06 * signal)
+            samples.append(
+                LabelledSample(
+                    symbol="X", timeframe="15m", ts=i * 900,
+                    features={"signal": signal, "noise": rng.random()},
+                    label=LABEL_WIN if win else LABEL_LOSS,
+                    horizon=24,
+                )
+            )
+        result = train_model(samples, min_rows=200, kind="meta", reward=2.0)
+        assert not result.accepted
+        assert "net_expectancy_r" in result.metrics
+        assert "break_even_win_rate" in result.metrics
+        # Whichever check failed, the message must name it.
+        assert "rank" in result.reason or "loses money" in result.reason
+
+    def test_the_reward_ratio_reaches_the_metrics(self):
+        import random
+        from app.ml.dataset import LabelledSample
+
+        rng = random.Random(9)
+        samples = [
+            LabelledSample(
+                symbol="X", timeframe="15m", ts=i * 900,
+                features={"signal": rng.random()},
+                label=LABEL_WIN if i % 3 == 0 else LABEL_LOSS,
+                horizon=24,
+            )
+            for i in range(1500)
+        ]
+        result = train_model(samples, min_rows=200, kind="meta", reward=3.0)
+        assert result.metrics["reward_r"] == 3.0
+        assert result.metrics["break_even_win_rate"] == pytest.approx(0.25)
 
 
 class TestDecileLift:
