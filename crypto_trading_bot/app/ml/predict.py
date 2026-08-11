@@ -20,12 +20,19 @@ from typing import Any, Mapping
 from app.compat import HAVE_NUMPY, numpy
 from app.logger import get_logger
 from app.ml.dataset import LABEL_LONG, LABEL_NO_TRADE, LABEL_SHORT
+from app.ml.meta import LABEL_WIN, SIDE_FEATURE
 from app.ml.model_registry import ModelArtifact, ModelRegistry
 
 log = get_logger(__name__)
 
 _MIN_PROBABILITY = 0.001
 _MAX_PROBABILITY = 0.98
+
+#: Minimum share of a model's features that must be present in the row it is
+#: asked about.  Below this the vector is mostly training means, the output is
+#: near-constant, and the "prediction" is an artefact of the feature names not
+#: matching -- so the predictor abstains loudly instead of answering.
+_MIN_FEATURE_COVERAGE = 0.5
 
 
 class Predictor:
@@ -41,6 +48,7 @@ class Predictor:
         self._lock = threading.RLock()
         self.predictions = 0
         self.failures = 0
+        self._warned_coverage = False
         if artifact is None and registry is not None:
             self.reload()
 
@@ -73,12 +81,93 @@ class Predictor:
 
     # -- inference --------------------------------------------------------
 
+    def _covered(self, artifact: ModelArtifact, features: Mapping[str, float]) -> bool:
+        """Guard against a model being fed a row it shares no features with."""
+
+        coverage = artifact.feature_spec.coverage(features)
+        if coverage >= _MIN_FEATURE_COVERAGE:
+            return True
+
+        self.failures += 1
+        if not self._warned_coverage:
+            self._warned_coverage = True
+            expected = list(artifact.feature_spec.names)[:5]
+            got = list(features)[:5]
+            log.error(
+                "model %s shares only %.0f%% of its features with the live "
+                "feature vector, so every prediction would be the same constant. "
+                "Refusing to predict. Expected names like %s, received %s. "
+                "Retrain with the current feature builder.",
+                artifact.key,
+                coverage * 100,
+                expected,
+                got,
+            )
+        return False
+
+    @property
+    def feature_coverage_ok(self) -> bool:
+        """False once a coverage mismatch has been detected."""
+
+        return not self._warned_coverage
+
+    @property
+    def is_meta(self) -> bool:
+        """True when the active model grades the rules rather than replacing them."""
+
+        return self.artifact is not None and self.artifact.kind == "meta"
+
+    def predict_meta(self, features: Mapping[str, float], side: int) -> float | None:
+        """Probability that a trade in ``side`` reaches its target first.
+
+        Returns ``None`` when no meta model is loaded, so the caller can tell
+        "no opinion" apart from "low probability" -- a distinction the whole
+        system depends on.
+        """
+
+        if not self.ready or not self.is_meta or side == 0:
+            return None
+
+        artifact = self.artifact
+        assert artifact is not None
+        if not self._covered(artifact, features):
+            return None
+        try:
+            enriched = dict(features)
+            enriched[SIDE_FEATURE] = 1.0 if side > 0 else -1.0
+            vector = artifact.feature_spec.transform(enriched)
+            raw = self._raw_probabilities(artifact, vector)
+        except Exception as exc:  # noqa: BLE001 - never break the trading loop
+            self.failures += 1
+            log.warning("meta prediction failed: %s", exc)
+            return None
+
+        self.predictions += 1
+        probability = raw[LABEL_WIN] if len(raw) > LABEL_WIN else 0.0
+
+        # The win calibrator is stored in the long slot; a meta model has only
+        # one head, so the short slot is unused.
+        if artifact.long_calibrator is not None:
+            probability = artifact.long_calibrator.transform(probability)
+
+        return round(min(max(probability, _MIN_PROBABILITY), _MAX_PROBABILITY), 4)
+
     def predict(self, features: Mapping[str, float]) -> tuple[float, float, float]:
         if not self.ready:
             return 0.0, 0.0, 1.0
 
         artifact = self.artifact
         assert artifact is not None
+
+        if artifact.kind == "meta":
+            # A meta model has no unconditional directional view.  Reporting
+            # one would be a fabrication, so it abstains here and the signal
+            # engine reaches for predict_meta instead.
+            return 0.0, 0.0, 1.0
+
+        if not self._covered(artifact, features):
+            return 0.0, 0.0, 1.0
+
         try:
             vector = artifact.feature_spec.transform(features)
             raw = self._raw_probabilities(artifact, vector)

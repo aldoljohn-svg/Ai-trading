@@ -522,13 +522,62 @@ request, so deep history is fetched in pages. Sample yield per symbol is
 gives ~1894. Expect `--top 40 --limit 8000` to take 20–45 minutes and produce
 tens of thousands of labelled samples.
 
+### Meta-labelling (`--mode meta`, the default)
+
+The direction model asks the hardest possible question — *which way will price
+go from this bar?* — at every bar, including the overwhelming majority where no
+setup exists and the answer is close to a coin flip. On real 15m crypto data it
+does not beat a constant predictor. That is the expected outcome, not a
+surprise: short-horizon directional return is close to a martingale.
+
+Meta-labelling asks a narrower, genuinely learnable question instead:
+
+> given that the rules already say LONG here, does this trade reach its target
+> before its stop?
+
+Two things change. The **sample is filtered** — only bars where the rules take a
+directional view become rows, so structureless bars stop diluting the signal.
+And the **label is binary and matches what a trade experiences**, rather than a
+three-way direction guess.
+
+It also matches how the output is already used: the signal engine reads
+`p_long` when the side is LONG and `p_short` when it is SHORT, never both.
+
+A meta model is judged on whether it can **rank** trades, not on argmax
+accuracy — accuracy is blind on an imbalanced binary problem. The acceptance
+test compares the win rate of its top-scoring fifth against its bottom fifth and
+requires a lift of at least 1.15.
+
+`--mode direction` still trains the original three-class model.
+
 **A rejected model is the system working.** The trainer refuses anything that
-does not beat the majority-class baseline on both accuracy and Brier score,
-because an uninformative model that ships is worse than no model — the signal
-engine would weight its noise. The bot keeps running on rules alone, which is
-the safe outcome. If a model is rejected, try more data or a different horizon;
-if it keeps failing, that is a real finding about the label, not a bug to work
-around.
+cannot beat its baseline, because an uninformative model that ships is worse
+than no model — the signal engine would weight its noise. The bot keeps running
+on rules alone, which is the safe outcome. If a model keeps failing, that is a
+real finding about the label, not a bug to work around.
+
+### Choosing what to train on
+
+`--top N` ranks candidates by **activity** by default: trend quality, momentum,
+volatility fit and range expansion, using the same scorer as the scanner's
+screen stage. Ranking on 24h volume alone (`--select volume`) returns the same
+permanently-liquid majors every time, including the ones that have done nothing
+for a week — and a symbol grinding sideways contributes bars whose barriers
+never resolve. `--min-volume` overrides the liquidity floor underneath either
+ranking.
+
+### Feature namespacing
+
+`SymbolAnalysis.features()` namespaces every feature by timeframe (`15m_rsi`,
+`1h_rsi`), and `FeatureSpec` substitutes the training mean for any name it
+cannot find. A model trained on bare names and asked about prefixed ones
+therefore receives an all-zero vector and returns the same constant for every
+symbol — silently, with nothing raised.
+
+The trainer now emits the prefix for the timeframe it trains on, and the
+predictor refuses to answer when fewer than half its features are present,
+logging what it expected against what it received. Both behaviours are covered
+by tests.
 
 Labels use the triple-barrier method (upper barrier at +2 ATR, lower at −1 ATR,
 vertical at 24 bars) with the pessimistic tie-break. Features are rebuilt bar by
@@ -1120,7 +1169,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       512 tests
+├── tests/                       540 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

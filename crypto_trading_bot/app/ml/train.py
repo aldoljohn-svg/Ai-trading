@@ -38,6 +38,7 @@ from app.ml.dataset import (
     time_split,
 )
 from app.ml.features import FeatureSpec
+from app.ml.meta import LABEL_WIN
 from app.ml.model_registry import ModelArtifact
 
 log = get_logger(__name__)
@@ -198,12 +199,25 @@ def train_model(
     min_rows: int = 400,
     test_fraction: float = 0.25,
     prefer_backend: str | None = None,
+    kind: str = "direction",
 ) -> TrainingResult:
-    """Train, calibrate, evaluate and (if it earns it) return an artefact."""
+    """Train, calibrate, evaluate and (if it earns it) return an artefact.
 
-    distribution = class_distribution(samples)
+    ``kind`` selects the problem being solved.  ``direction`` is the three-class
+    LONG/SHORT/NO_TRADE model; ``meta`` is the binary "does the rules' chosen
+    side reach its target first" model, which is scored on whether it can *rank*
+    trades rather than on argmax accuracy.
+    """
+
+    if kind == "meta":
+        from app.ml.meta import meta_class_distribution
+
+        distribution = meta_class_distribution(samples)
+    else:
+        distribution = class_distribution(samples)
     metrics: dict[str, Any] = {
         "rows": len(samples),
+        "kind": kind,
         "class_distribution": distribution,
     }
 
@@ -249,6 +263,19 @@ def train_model(
     metrics["features"] = len(spec)
     metrics["train_rows"] = len(train)
     metrics["test_rows"] = len(test)
+
+    if kind == "meta":
+        return _finish_meta(
+            samples=samples,
+            spec=spec,
+            model=model,
+            backend=backend,
+            probabilities=probabilities,
+            y_test=y_test,
+            metrics=metrics,
+            distribution=distribution,
+            name=name,
+        )
 
     # --- calibration on the held-out slice (one-vs-rest per direction) ---
     long_scores = [p[LABEL_LONG] for p in probabilities]
@@ -317,6 +344,119 @@ def train_model(
         long_calibrator=long_calibrator,
         short_calibrator=short_calibrator,
         metrics=metrics,
+    )
+    artifact.attach_runtime(model)
+    return TrainingResult(artifact=artifact, metrics=metrics, accepted=True, reason="ok")
+
+
+#: A meta model earns its place by *ranking* trades, so the top slice of its
+#: predictions must win meaningfully more often than the bottom slice.  1.15 is
+#: a modest bar -- a 15% relative edge in win rate between best and worst -- but
+#: it is a real one, and noise does not clear it on thousands of test rows.
+_MIN_META_LIFT = 1.15
+
+#: Size of the top/bottom slices used for that comparison.
+_META_TAIL = 0.2
+
+
+def _decile_lift(scores: Sequence[float], labels: Sequence[int]) -> dict[str, float]:
+    """Win rate in the highest-scoring slice against the lowest-scoring slice.
+
+    This is the question a meta model actually has to answer: when it is more
+    confident, does the trade win more often?  Accuracy cannot see that on an
+    imbalanced binary problem, where predicting the majority class everywhere
+    scores well while being useless for choosing between trades.
+    """
+
+    paired = sorted(zip(scores, labels), key=lambda pair: pair[0])
+    size = max(int(len(paired) * _META_TAIL), 1)
+    bottom = paired[:size]
+    top = paired[-size:]
+
+    bottom_rate = sum(label for _, label in bottom) / len(bottom)
+    top_rate = sum(label for _, label in top) / len(top)
+    # Guard the ratio: a bottom slice that never wins would divide by zero.
+    lift = top_rate / bottom_rate if bottom_rate > 0 else (top_rate / 1e-6 if top_rate else 0.0)
+
+    return {
+        "top_win_rate": round(top_rate, 4),
+        "bottom_win_rate": round(bottom_rate, 4),
+        "lift": round(min(lift, 99.0), 3),
+        "slice_size": size,
+    }
+
+
+def _finish_meta(
+    samples: Sequence[LabelledSample],
+    spec: FeatureSpec,
+    model: Any,
+    backend: str,
+    probabilities: Sequence[Sequence[float]],
+    y_test: Sequence[int],
+    metrics: dict[str, Any],
+    distribution: dict[str, int],
+    name: str,
+) -> TrainingResult:
+    """Calibrate, score and judge a binary meta model."""
+
+    win_scores = [p[LABEL_WIN] if len(p) > LABEL_WIN else 0.0 for p in probabilities]
+    win_labels = [1 if y == LABEL_WIN else 0 for y in y_test]
+
+    calibrator, calibration_metrics = fit_calibrator(win_scores, win_labels)
+    metrics["calibration_win"] = calibration_metrics
+
+    calibrated = [
+        calibrator.transform(s) if calibrator else s for s in win_scores
+    ]
+
+    base_rate = sum(win_labels) / len(win_labels)
+    metrics["base_win_rate"] = round(base_rate, 4)
+    metrics["accuracy"] = round(
+        sum(1 for p, y in zip(probabilities, y_test) if _argmax(p) == y) / len(y_test),
+        4,
+    )
+    metrics["brier_win"] = round(brier_score(calibrated, win_labels), 5)
+    metrics["ece_win"] = round(expected_calibration_error(calibrated, win_labels), 5)
+    metrics["reliability_win"] = reliability_table(calibrated, win_labels)
+
+    baseline_brier = brier_score([base_rate] * len(win_labels), win_labels)
+    metrics["baseline_brier_win"] = round(baseline_brier, 5)
+
+    lift_metrics = _decile_lift(calibrated, win_labels)
+    metrics.update(lift_metrics)
+
+    beats_baseline = metrics["brier_win"] <= baseline_brier * 1.01
+    separates = lift_metrics["lift"] >= _MIN_META_LIFT
+
+    if not (beats_baseline and separates):
+        return TrainingResult(
+            artifact=None,
+            metrics=metrics,
+            accepted=False,
+            reason=(
+                "meta model does not usefully rank trades "
+                f"(top {lift_metrics['top_win_rate']:.1%} vs bottom "
+                f"{lift_metrics['bottom_win_rate']:.1%} win rate, lift "
+                f"{lift_metrics['lift']:.2f} against the {_MIN_META_LIFT:.2f} "
+                f"minimum; Brier {metrics['brier_win']:.4f} vs "
+                f"{baseline_brier:.4f}) - refusing to deploy it"
+            ),
+        )
+
+    artifact = ModelArtifact(
+        name=name,
+        version=time.strftime("%Y%m%d-%H%M%S", time.gmtime()),
+        algorithm=backend,
+        trained_at=int(time.time()),
+        rows=len(samples),
+        feature_spec=spec,
+        model_payload=_serialise_model(backend, model),
+        # A meta model has one head; the win calibrator lives in the long slot
+        # and the short slot stays empty.
+        long_calibrator=calibrator,
+        short_calibrator=None,
+        metrics=metrics,
+        kind="meta",
     )
     artifact.attach_runtime(model)
     return TrainingResult(artifact=artifact, metrics=metrics, accepted=True, reason="ok")

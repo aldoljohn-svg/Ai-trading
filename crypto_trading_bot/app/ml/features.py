@@ -59,6 +59,23 @@ class FeatureSpec:
     def transform_many(self, rows: Iterable[Mapping[str, float]]) -> list[list[float]]:
         return [self.transform(row) for row in rows]
 
+    def coverage(self, row: Mapping[str, float]) -> float:
+        """Fraction of this spec's features actually present in ``row``.
+
+        Missing features silently fall back to the training mean, which
+        standardises to exactly zero.  That is the right behaviour for one
+        absent value and a catastrophe for all of them: a row sharing no keys
+        with the spec becomes an all-zero vector, and the model returns the same
+        confident answer for every symbol forever.
+
+        Callers check this so the failure is loud instead of invisible.
+        """
+
+        if not self.names:
+            return 0.0
+        present = sum(1 for name in self.names if name in row)
+        return present / len(self.names)
+
     def as_dict(self) -> dict[str, list]:
         return {"names": self.names, "means": self.means, "stds": self.stds}
 

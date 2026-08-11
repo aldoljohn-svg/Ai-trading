@@ -68,6 +68,45 @@ _MIN_BARS: dict[Timeframe, int] = {
 }
 
 
+def directional_bias(
+    structure: MarketStructure,
+    ict: ICTAnalysis,
+    rtm: RTMAnalysis,
+    indicators: IndicatorSet,
+) -> Bias:
+    """Blend the structural readings into one directional view.
+
+    A free function rather than only a method because the meta-label trainer
+    needs the identical decision when replaying history.  If the two ever
+    diverged, the model would be graded on an engine that does not exist.
+
+    Three structural votes plus the moving-average stack.  A clear majority of
+    two is required to call a direction; two conflicting reads, or one vote each
+    way, is CONFLICT rather than a coin toss.
+    """
+
+    votes = [structure.bias, ict.bias(), rtm.bias()]
+    bullish = sum(1 for v in votes if v is Bias.BULLISH)
+    bearish = sum(1 for v in votes if v is Bias.BEARISH)
+    conflict = sum(1 for v in votes if v is Bias.CONFLICT)
+
+    stack = indicators.ma_stack
+    if stack > 0:
+        bullish += 1
+    elif stack < 0:
+        bearish += 1
+
+    if conflict >= 2:
+        return Bias.CONFLICT
+    if bullish >= bearish + 2:
+        return Bias.BULLISH
+    if bearish >= bullish + 2:
+        return Bias.BEARISH
+    if bullish and bearish:
+        return Bias.CONFLICT
+    return Bias.NEUTRAL
+
+
 @dataclass(slots=True)
 class TimeframeAnalysis:
     """The complete analytical read for one symbol on one timeframe."""
@@ -91,26 +130,7 @@ class TimeframeAnalysis:
     def bias(self) -> Bias:
         """Blend the three structural readings into one directional view."""
 
-        votes = [self.structure.bias, self.ict.bias(), self.rtm.bias()]
-        bullish = sum(1 for v in votes if v is Bias.BULLISH)
-        bearish = sum(1 for v in votes if v is Bias.BEARISH)
-        conflict = sum(1 for v in votes if v is Bias.CONFLICT)
-
-        stack = self.indicators.ma_stack
-        if stack > 0:
-            bullish += 1
-        elif stack < 0:
-            bearish += 1
-
-        if conflict >= 2:
-            return Bias.CONFLICT
-        if bullish >= bearish + 2:
-            return Bias.BULLISH
-        if bearish >= bullish + 2:
-            return Bias.BEARISH
-        if bullish and bearish:
-            return Bias.CONFLICT
-        return Bias.NEUTRAL
+        return directional_bias(self.structure, self.ict, self.rtm, self.indicators)
 
     def as_features(self, prefix: str = "") -> dict[str, float]:
         features: dict[str, float] = {}
@@ -154,6 +174,102 @@ class ScreenResult:
             "direction": self.direction,
             "note": self.note,
         }
+
+
+def score_activity(
+    candidate: ScanCandidate, candles: Sequence[Candle]
+) -> ScreenResult:
+    """Score how *interesting* a symbol is right now from one timeframe.
+
+    A ticker says a symbol is liquid.  It does not say whether anything is
+    happening on the chart, which is why ranking on 24h volume alone surfaces
+    the same permanently-liquid majors every cycle while a coin in a clean trend
+    with expanding range never gets looked at.
+
+    Four components:
+
+    * **trend** - a directional MA stack, weighted by how linear the Average
+      line is.  A stack that exists only because price is chopping across the
+      averages scores low.
+    * **momentum** - ADX for strength, tempered when RSI says the move is
+      already stretched and has less room left.
+    * **volatility fit** - enough range to pay costs, not so much that stops
+      have to be absurdly wide.
+    * **expansion** - bandwidth at either extreme of its recent distribution.
+      Both a fresh squeeze and a fresh expansion are worth attention; the dead
+      middle is not.
+
+    Used by the scanner's screen stage and by the trainer when choosing which
+    symbols to learn from, so both mean the same thing by "worth looking at".
+    """
+
+    if len(candles) < 60:
+        return ScreenResult(
+            candidate=candidate,
+            score=candidate.prescreen_score * 0.5,
+            note="not enough history to screen",
+        )
+
+    indicators = compute_indicators(list(candles))
+    slopes = compute_slopes(indicators, [c.close for c in candles])
+
+    atr = indicators.last_atr or 0.0
+    close = indicators.close or candles[-1].close
+    adx = indicators.last_adx or 0.0
+    rsi = indicators.last_rsi or 50.0
+    stack = indicators.ma_stack
+
+    trend = 0.0
+    if stack != 0:
+        trend = 60.0 + 40.0 * min(slopes.trend_quality, 1.0)
+    elif slopes.aligned_bullish or slopes.aligned_bearish:
+        trend = 45.0
+
+    momentum = min(adx / 40.0, 1.0) * 100.0
+    if rsi > 75 or rsi < 25:
+        momentum *= 0.7
+
+    atr_pct = (atr / close) if close > 0 else 0.0
+    if atr_pct <= 0:
+        volatility = 0.0
+    elif atr_pct < 0.002:
+        volatility = 100.0 * atr_pct / 0.002        # too quiet to pay costs
+    elif atr_pct <= 0.03:
+        volatility = 100.0
+    else:
+        volatility = max(0.0, 100.0 * (1.0 - (atr_pct - 0.03) / 0.07))
+
+    bandwidth = indicators.last_bandwidth or 0.0
+    history = [b for b in indicators.bb_bandwidth[-60:] if b is not None]
+    expansion = 0.0
+    if history and bandwidth > 0:
+        ordered = sorted(history)
+        rank = sum(1 for b in ordered if b <= bandwidth) / len(ordered)
+        expansion = 100.0 * abs(rank - 0.5) * 2.0
+
+    score = (
+        0.35 * trend
+        + 0.25 * momentum
+        + 0.20 * volatility
+        + 0.10 * expansion
+        + 0.10 * candidate.prescreen_score
+    )
+
+    direction = stack if stack != 0 else (1 if slopes.average_slope > 0 else -1)
+    note = (
+        f"{'up' if direction > 0 else 'down'} trend {trend:.0f}, "
+        f"ADX {adx:.0f}, ATR {atr_pct:.2%}"
+    )
+    return ScreenResult(
+        candidate=candidate,
+        score=score,
+        trend=trend,
+        momentum=momentum,
+        volatility=volatility,
+        expansion=expansion,
+        direction=direction,
+        note=note,
+    )
 
 
 @dataclass(slots=True)
@@ -356,74 +472,7 @@ class Scanner:
                 limit=240,
                 min_length=200,
             )
-
-        indicators = compute_indicators(candles)
-        slopes = compute_slopes(indicators, [c.close for c in candles])
-
-        atr = indicators.last_atr or 0.0
-        close = indicators.close or candles[-1].close
-        adx = indicators.last_adx or 0.0
-        rsi = indicators.last_rsi or 50.0
-        stack = indicators.ma_stack
-
-        # --- trend: a directional stack confirmed by a linear Average line ---
-        trend = 0.0
-        if stack != 0:
-            trend = 60.0 + 40.0 * min(slopes.trend_quality, 1.0)
-        elif slopes.aligned_bullish or slopes.aligned_bearish:
-            trend = 45.0
-
-        # --- momentum: ADX for strength, RSI for extension -------------------
-        momentum = min(adx / 40.0, 1.0) * 100.0
-        # A market already stretched has less room left, so temper the score.
-        if rsi > 75 or rsi < 25:
-            momentum *= 0.7
-
-        # --- volatility fit: enough to pay costs, not so much stops break ----
-        atr_pct = (atr / close) if close > 0 else 0.0
-        if atr_pct <= 0:
-            volatility = 0.0
-        elif atr_pct < 0.002:
-            volatility = 100.0 * atr_pct / 0.002        # too quiet to pay costs
-        elif atr_pct <= 0.03:
-            volatility = 100.0
-        else:
-            volatility = max(0.0, 100.0 * (1.0 - (atr_pct - 0.03) / 0.07))
-
-        # --- expansion: bandwidth widening after a squeeze is where moves start
-        bandwidth = indicators.last_bandwidth or 0.0
-        history = [b for b in indicators.bb_bandwidth[-60:] if b is not None]
-        expansion = 0.0
-        if history and bandwidth > 0:
-            ordered = sorted(history)
-            rank = sum(1 for b in ordered if b <= bandwidth) / len(ordered)
-            # Both a fresh squeeze and a fresh expansion are interesting; the
-            # dead middle is not.
-            expansion = 100.0 * abs(rank - 0.5) * 2.0
-
-        score = (
-            0.35 * trend
-            + 0.25 * momentum
-            + 0.20 * volatility
-            + 0.10 * expansion
-            + 0.10 * candidate.prescreen_score
-        )
-
-        direction = stack if stack != 0 else (1 if slopes.average_slope > 0 else -1)
-        note = (
-            f"{'up' if direction > 0 else 'down'} trend {trend:.0f}, "
-            f"ADX {adx:.0f}, ATR {atr_pct:.2%}"
-        )
-        return ScreenResult(
-            candidate=candidate,
-            score=score,
-            trend=trend,
-            momentum=momentum,
-            volatility=volatility,
-            expansion=expansion,
-            direction=direction,
-            note=note,
-        )
+        return score_activity(candidate, candles)
 
     # -- stage 2 ----------------------------------------------------------
 

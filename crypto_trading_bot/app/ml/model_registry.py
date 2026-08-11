@@ -38,6 +38,11 @@ class ModelArtifact:
     long_calibrator: Calibrator | None = None
     short_calibrator: Calibrator | None = None
     metrics: dict[str, Any] = field(default_factory=dict)
+    #: "direction" predicts LONG/SHORT/NO_TRADE from scratch; "meta" predicts
+    #: whether the rule engine's chosen side reaches its target first.  The
+    #: predictor reads this to know how to interpret the model's outputs, so an
+    #: older artifact without the field is treated as a direction model.
+    kind: str = "direction"
     runtime: Any = field(default=None, compare=False, repr=False)
 
     @property
@@ -69,6 +74,7 @@ class ModelArtifact:
                 self.short_calibrator.as_dict() if self.short_calibrator else None
             ),
             "metrics": self.metrics,
+            "kind": self.kind,
         }
 
     @classmethod
@@ -84,6 +90,7 @@ class ModelArtifact:
             long_calibrator=calibrator_from_dict(data.get("long_calibrator")),
             short_calibrator=calibrator_from_dict(data.get("short_calibrator")),
             metrics=dict(data.get("metrics", {})),
+            kind=str(data.get("kind", "direction")),
         )
 
 

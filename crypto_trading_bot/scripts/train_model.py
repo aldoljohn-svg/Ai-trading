@@ -33,62 +33,131 @@ from app.logger import get_logger, setup_logging  # noqa: E402
 from app.market_structure.structure import analyse_structure  # noqa: E402
 from app.ict.ict_engine import analyse_ict  # noqa: E402
 from app.ml.dataset import build_dataset, class_distribution  # noqa: E402
+from app.ml.meta import (  # noqa: E402
+    MetaStats,
+    analyse_window,
+    build_meta_dataset,
+    meta_class_distribution,
+)
 from app.ml.model_registry import ModelRegistry  # noqa: E402
 from app.ml.train import train_model  # noqa: E402
 from app.rtm.rtm_engine import analyse_rtm  # noqa: E402
 from app.scanner.instruments import parse_allowed_classes  # noqa: E402
+from app.scanner.scanner import score_activity  # noqa: E402
 from app.scanner.universe import UniverseBuilder  # noqa: E402
 
 log = get_logger("train")
 
 
-def feature_builder(history):
+def make_feature_builder(prefix: str):
     """Features for one bar, computed from ``history`` only.
 
+    ``prefix`` must be the timeframe prefix the live scanner emits ("15m_",
+    "1h_", ...).  SymbolAnalysis.features() namespaces every feature by
+    timeframe, and FeatureSpec silently substitutes the training mean for any
+    name it cannot find - so a model trained on bare names and asked about
+    prefixed ones sees an all-zero vector and returns the same constant for
+    every symbol, with no error raised anywhere.
+
     The window is capped so training uses the same amount of context the live
-    scanner does - a model trained on 5000 bars of history would see a
-    different world at inference time.
+    scanner does; a model trained on 5000 bars of history would see a different
+    world at inference time.
     """
 
-    window = list(history[-400:])
-    if len(window) < 200:
-        return {}
-    indicators = compute_indicators(window)
-    slopes = compute_slopes(indicators, [c.close for c in window])
-    structure = analyse_structure(window, indicators.atr)
-    ict = analyse_ict(window, indicators.atr, structure)
-    rtm = analyse_rtm(window, indicators.atr)
+    def feature_builder(history):
+        features, _ = analyse_window(history, prefix=prefix)
+        return features
 
-    features: dict[str, float] = {}
-    features.update(indicators.as_features())
-    features.update(slopes.as_features())
-    features.update(structure.as_features())
-    features.update(ict.as_features())
-    features.update(rtm.as_features())
-    return features
+    return feature_builder
 
 
-async def _liquid_symbols(exchange, settings, count: int) -> list[str]:
-    """The ``count`` most liquid contracts the scanner would actually consider.
+async def _training_symbols(
+    exchange,
+    settings,
+    count: int,
+    timeframe: Timeframe,
+    select: str = "activity",
+    min_volume: float | None = None,
+) -> list[str]:
+    """Choose which symbols to learn from.
 
-    Reuses the live universe filter so training and inference see the same kind
-    of instrument.  A model trained on tokenised equities and then applied to
-    perpetual crypto has learned the wrong market.
+    Reuses the live universe filter, so training never sees tokenised equities
+    or anything else the scanner would refuse -- a model trained on instruments
+    it will never be asked about has learned the wrong market.
+
+    ``select`` decides how the survivors are ranked:
+
+    ``volume``
+        Straight 24h quote volume.  Simple, but it returns the same
+        permanently-liquid majors every time, including the ones that have done
+        nothing for a week.
+
+    ``activity`` (default)
+        The same measure the scanner's screen stage uses: trend quality,
+        momentum, volatility fit and range expansion, on top of the liquidity
+        pre-screen.  A symbol that is liquid *and* actually moving produces far
+        more resolved barrier outcomes per bar than one grinding sideways, so
+        the dataset carries more decided trades and fewer timeouts.
+
+    A liquidity floor still applies underneath either ranking -- ``activity``
+    reorders symbols that already passed it, it does not admit illiquid ones.
     """
 
     contracts = await exchange.contracts()
     tickers = await exchange.tickers()
     universe = UniverseBuilder(
         quote_currency=settings.quote_currency,
-        min_quote_volume=settings.min_24h_quote_volume,
+        min_quote_volume=(
+            min_volume if min_volume is not None else settings.min_24h_quote_volume
+        ),
         max_spread_pct=settings.max_spread_pct,
         blacklist=settings.symbol_blacklist,
-        max_symbols=max(count, 1),
+        # Screen a wider pool than we need so the ranking has something to
+        # choose between rather than just accepting whatever passed.
+        max_symbols=max(count * 3, count),
         allowed_classes=parse_allowed_classes(settings.allowed_instrument_classes),
     )
     candidates = universe.build(contracts, tickers)
-    ordered = sorted(candidates, key=lambda c: c.quote_volume, reverse=True)
-    return [c.symbol for c in ordered[:count]]
+    if not candidates:
+        log.error(
+            "no symbol passed the universe filter: %s", universe.last_report.summary()
+        )
+        return []
+
+    if select == "volume":
+        ordered = sorted(candidates, key=lambda c: c.quote_volume, reverse=True)
+        return [c.symbol for c in ordered[:count]]
+
+    log.info(
+        "ranking %d liquid symbols by trading activity on %s...",
+        len(candidates),
+        timeframe.value,
+    )
+    series = await fetch_history_many(
+        exchange, [c.symbol for c in candidates], timeframe, 240, concurrency=6
+    )
+
+    scored: list[tuple[float, str, str]] = []
+    for candidate in candidates:
+        candles = series.get(candidate.symbol)
+        if not candles:
+            continue
+        result = score_activity(candidate, candles)
+        scored.append((result.score, candidate.symbol, result.note))
+
+    if not scored:
+        log.warning("activity ranking produced nothing; falling back to volume")
+        ordered = sorted(candidates, key=lambda c: c.quote_volume, reverse=True)
+        return [c.symbol for c in ordered[:count]]
+
+    scored.sort(reverse=True)
+    for score, symbol, note in scored[:count]:
+        log.info("  %-14s activity %5.1f  %s", symbol, score, note)
+    if len(scored) > count:
+        dropped = [s for _, s, _ in scored[count : count + 6]]
+        log.info("  ... dropped as too quiet: %s", ", ".join(dropped))
+
+    return [symbol for _, symbol, _ in scored[:count]]
 
 
 async def main() -> int:
@@ -102,6 +171,34 @@ async def main() -> int:
             "ignore --symbols and train on the N most liquid tradable contracts. "
             "Three symbols is far too narrow a sample to generalise from; 30-60 "
             "is a more honest basis for a model the scanner applies to hundreds."
+        ),
+    )
+    parser.add_argument(
+        "--select",
+        choices=["activity", "volume"],
+        default="activity",
+        help=(
+            "how --top ranks candidates. 'activity' (default) prefers symbols "
+            "that are trending and moving, not merely liquid; 'volume' ranks on "
+            "24h quote volume alone."
+        ),
+    )
+    parser.add_argument(
+        "--min-volume",
+        type=float,
+        default=None,
+        help="override the 24h quote-volume floor for training symbol selection",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["meta", "direction"],
+        default="meta",
+        help=(
+            "'meta' (default) learns whether the rule engine's chosen side "
+            "reaches its target first -- a binary question, trained only on "
+            "bars where the rules take a view. 'direction' learns "
+            "LONG/SHORT/NO_TRADE from every bar, which is a much harder problem "
+            "and on short-horizon crypto usually fails to beat its baseline."
         ),
     )
     parser.add_argument("--timeframe", default="15m", choices=[t.value for t in Timeframe])
@@ -150,8 +247,17 @@ async def main() -> int:
 
     try:
         if args.top:
-            symbols = await _liquid_symbols(exchange, settings, args.top)
-            log.info("training on the %d most liquid contracts", len(symbols))
+            symbols = await _training_symbols(
+                exchange,
+                settings,
+                args.top,
+                timeframe,
+                select=args.select,
+                min_volume=args.min_volume,
+            )
+            log.info(
+                "training on %d symbols selected by %s", len(symbols), args.select
+            )
         else:
             symbols = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
 
@@ -176,19 +282,39 @@ async def main() -> int:
                 ", ".join(f"{s}={n}" for s, n in sorted(short.items())[:6]),
             )
 
+        # Namespace features exactly as the live scanner does for this
+        # timeframe, or the model will be unusable at inference time.
+        prefix = f"{timeframe.value}_"
+        feature_builder = make_feature_builder(prefix)
+        meta_stats = MetaStats()
         for symbol, candles in sorted(series.items()):
             log.info("building dataset for %s (%d bars)...", symbol, len(candles))
-            built = build_dataset(
-                symbol=symbol,
-                timeframe=timeframe,
-                candles=candles,
-                feature_fn=feature_builder,
-                horizon=args.horizon,
-                profit_atr=args.profit_atr,
-                loss_atr=args.loss_atr,
-                warmup=400,
-                stride=args.stride,
-            )
+            if args.mode == "meta":
+                built = build_meta_dataset(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    candles=candles,
+                    feature_fn=feature_builder,
+                    horizon=args.horizon,
+                    profit_atr=args.profit_atr,
+                    loss_atr=args.loss_atr,
+                    warmup=400,
+                    stride=args.stride,
+                    stats=meta_stats,
+                    prefix=prefix,
+                )
+            else:
+                built = build_dataset(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    candles=candles,
+                    feature_fn=feature_builder,
+                    horizon=args.horizon,
+                    profit_atr=args.profit_atr,
+                    loss_atr=args.loss_atr,
+                    warmup=400,
+                    stride=args.stride,
+                )
             log.info("  %d labelled samples", len(built))
             samples.extend(built)
     finally:
@@ -199,17 +325,28 @@ async def main() -> int:
         return 1
 
     log.info("total samples: %d", len(samples))
-    log.info("class distribution: %s", class_distribution(samples))
+    if args.mode == "meta":
+        log.info("filter: %s", meta_stats.summary())
+        log.info("class distribution: %s", meta_class_distribution(samples))
+        if meta_stats.win_rate < 0.05 or meta_stats.win_rate > 0.95:
+            log.warning(
+                "base win rate %.1%% is nearly degenerate - the barriers may be "
+                "mis-scaled for this timeframe",
+                meta_stats.win_rate * 100,
+            )
+    else:
+        log.info("class distribution: %s", class_distribution(samples))
 
     result = train_model(
         samples,
         name=args.name or settings.ml_model_name,
         min_rows=settings.ml_min_training_rows,
+        kind=args.mode,
     )
 
     print()
     for key, value in result.metrics.items():
-        if key != "reliability_long":
+        if key not in ("reliability_long", "reliability_win"):
             print(f"  {key:24s} {value}")
     print()
 

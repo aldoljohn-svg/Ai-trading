@@ -152,9 +152,24 @@ class SignalEngine:
         # --- 6. scoring + ML ---------------------------------------------
         probabilities = self._predict(analysis, proposal)
         proposal.p_long, proposal.p_short, proposal.p_no_trade = probabilities
-        ml_probability = proposal.p_long if side is Side.LONG else proposal.p_short
-        # An absent model contributes nothing rather than a zero probability.
-        ml_available = proposal.p_no_trade < 1.0
+
+        # A meta model answers "will this side reach its target first", which is
+        # exactly the number wanted here.  A direction model's unconditional
+        # p_long / p_short is the fallback.
+        meta_probability = self._predict_meta(proposal, side)
+        if meta_probability is not None:
+            ml_probability = meta_probability
+            ml_available = True
+            if side is Side.LONG:
+                proposal.p_long = meta_probability
+            else:
+                proposal.p_short = meta_probability
+            proposal.p_no_trade = round(1.0 - meta_probability, 4)
+        else:
+            ml_probability = proposal.p_long if side is Side.LONG else proposal.p_short
+            # An absent model contributes nothing rather than a zero probability.
+            ml_available = proposal.p_no_trade < 1.0
+
         ml_weight = settings.ml_weight if ml_available else 0.0
 
         breakdown = score_direction(
@@ -472,6 +487,24 @@ class SignalEngine:
         except Exception as exc:  # noqa: BLE001 - never let ML break trading
             log.warning("ML prediction failed for %s: %s", analysis.symbol, exc)
             return 0.0, 0.0, 1.0
+
+    def _predict_meta(self, proposal: TradeProposal, side: Side) -> float | None:
+        """P(this side reaches its target first), or ``None`` for no opinion.
+
+        ``None`` and a low probability mean different things -- one is silence,
+        the other is a warning -- so they must not be collapsed.
+        """
+
+        if self.predictor is None or not self.settings.ml_enabled:
+            return None
+        predict_meta = getattr(self.predictor, "predict_meta", None)
+        if not callable(predict_meta):
+            return None
+        try:
+            return predict_meta(proposal.features, side.sign)
+        except Exception as exc:  # noqa: BLE001 - never let ML break trading
+            log.warning("meta prediction failed for %s: %s", proposal.symbol, exc)
+            return None
 
     # -- leverage ---------------------------------------------------------
 
