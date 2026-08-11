@@ -75,6 +75,7 @@ from app.risk.risk_engine import RiskEngine
 from app.scanner.ranking import Opportunity, rank_opportunities
 from app.scanner.scanner import Scanner, SymbolAnalysis
 from app.scanner.universe import UniverseBuilder
+from app.intelligence import IntelligenceCoordinator, IntelligenceVerdict
 from app.signals.signal_engine import SignalEngine
 from app.signals.trade_proposal import Decision, TradeProposal
 
@@ -135,8 +136,16 @@ class TradingEngine:
         self.position_manager: PositionManager | None = None
         self.reconciler: Reconciler | None = None
         self.predictor: Predictor | None = None
+        self.intelligence: IntelligenceCoordinator | None = None
         self.health = HealthMonitor()
         self.paper: PaperEngine | None = None
+        #: Latest intelligence verdict per symbol, for Telegram / dashboard.
+        self.last_verdicts: dict[str, IntelligenceVerdict] = {}
+        #: Verdict that authorised each currently-open position, so a close can
+        #: be attributed back to the models that voted for it.
+        self._entry_verdicts: dict[str, IntelligenceVerdict] = {}
+        #: Proposal timestamp each cached verdict was computed for.
+        self._verdict_for: dict[str, int] = {}
 
         self.preflight_report: PreflightReport | None = None
         self.last_health: HealthReport | None = None
@@ -198,6 +207,16 @@ class TradingEngine:
         )
         self.predictor = Predictor(registry, model_name=settings.ml_model_name)
         self.signal_engine = SignalEngine(settings, predictor=self.predictor)
+
+        if settings.intelligence_enabled:
+            self.intelligence = IntelligenceCoordinator(
+                settings,
+                predictor=self.predictor,
+                repositories=self.repositories,
+            )
+            loaded = self.intelligence.load_weights()
+            if loaded:
+                log.info("restored performance weights for %d models", loaded)
 
         portfolio_risk = PortfolioRisk(
             max_portfolio_risk=settings.max_portfolio_risk,
@@ -682,10 +701,93 @@ class TradingEngine:
                 log.debug("could not record opportunities: %s", exc)
 
         await self._sync_account()
+        await self._assess_opportunities(opportunities)
         await self._consider_entries(opportunities)
         # Re-mark after any entry so margin and exposure reflect what was opened.
         self.portfolio.mark_to_market()
         return opportunities
+
+    async def _assess_opportunities(
+        self, opportunities: Sequence[Opportunity], limit: int = 8
+    ) -> None:
+        """Run the intelligence layer over the best-ranked opportunities.
+
+        This happens on every scan, not only when something is tradable.  Two
+        reasons: the operator wants to see *why* nothing was taken, and the
+        decision journal is only honest if it records the refusals as well as
+        the entries.
+        """
+
+        if self.intelligence is None or not self.portfolio:
+            return
+
+        state = self.portfolio.state()
+        for opportunity in list(opportunities)[:limit]:
+            await self._intelligence_verdict(opportunity, state)
+
+    async def _intelligence_verdict(
+        self, opportunity: Opportunity, state: Any
+    ) -> IntelligenceVerdict | None:
+        """Run the advanced layer over an opportunity, tolerating its failure.
+
+        A crash inside the intelligence layer must never *enable* a trade that
+        would otherwise be blocked, and must never block the whole scan.  On
+        failure we return ``None``, which leaves the pre-upgrade behaviour --
+        the signal engine and risk engine decide on their own.
+        """
+
+        if self.intelligence is None:
+            return None
+
+        analysis = self.last_analyses.get(opportunity.symbol)
+        if analysis is None:
+            return None
+
+        proposal = opportunity.proposal
+
+        # The scan already assessed the top opportunities.  Re-using that
+        # verdict keeps the entry decision consistent with what the operator
+        # was shown, and stops the journal recording the same decision twice.
+        cached = self.last_verdicts.get(opportunity.symbol)
+        if cached is not None and self._verdict_for.get(opportunity.symbol) == proposal.ts:
+            return cached
+
+        notional = 0.0
+        if proposal.entry > 0 and proposal.stop_loss > 0:
+            stop_distance = abs(proposal.entry - proposal.stop_loss)
+            if stop_distance > 0:
+                risk_cash = state.equity * self.settings.default_risk_per_trade
+                notional = risk_cash / stop_distance * proposal.entry
+
+        try:
+            verdict = self.intelligence.evaluate(
+                analysis=analysis,
+                proposal=proposal,
+                portfolio_state=state,
+                portfolio_risk=self.portfolio.portfolio_risk if self.portfolio else None,
+                market_data_health=(
+                    self.market_data.health() if self.market_data else None
+                ),
+                exchange_health=self.last_health,
+                latency_ms=(
+                    self.market_data.stats.median_latency_ms if self.market_data else 0.0
+                ),
+                notional=notional,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.stats.errors += 1
+            log.exception(
+                "intelligence layer failed for %s: %s", opportunity.symbol, exc
+            )
+            return None
+
+        self.last_verdicts[opportunity.symbol] = verdict
+        self._verdict_for[opportunity.symbol] = proposal.ts
+        if len(self.last_verdicts) > 60:
+            for symbol in list(self.last_verdicts)[:-60]:
+                del self.last_verdicts[symbol]
+                self._verdict_for.pop(symbol, None)
+        return verdict
 
     async def _consider_entries(self, opportunities: Sequence[Opportunity]) -> None:
         assert self.risk_engine and self.portfolio and self.execution
@@ -712,11 +814,41 @@ class TradingEngine:
                 continue
 
             state = self.portfolio.state()
+
+            # The intelligence layer runs *before* sizing so that a veto costs
+            # nothing, and so its size opinion can only shrink what the risk
+            # engine would otherwise have allowed.
+            verdict = await self._intelligence_verdict(opportunity, state)
+            if verdict is not None and not verdict.approved:
+                log.info(
+                    "intelligence declined %s: %s",
+                    opportunity.symbol,
+                    "; ".join(verdict.veto_reasons[:2]) or "proposal not an entry",
+                )
+                if self.repositories:
+                    self.repositories.events.risk_event(
+                        kind="INTELLIGENCE_VETO",
+                        message=f"{opportunity.symbol}: "
+                        + "; ".join(verdict.veto_reasons[:2]),
+                        severity="INFO",
+                        symbol=opportunity.symbol,
+                        detail={
+                            "decision_id": verdict.decision_id,
+                            "quality": round(verdict.quality_score, 1),
+                            "agreement": verdict.model_agreement,
+                            "veto_reasons": verdict.veto_reasons,
+                        },
+                    )
+                continue
+
             decision = self.risk_engine.evaluate(
                 proposal=opportunity.proposal,
                 state=state,
                 spec=spec,
                 breaker_report=breaker,
+                intelligence_scale=(
+                    verdict.size_multiplier if verdict is not None else 1.0
+                ),
             )
             if not decision.approved:
                 log.info(
@@ -752,6 +884,15 @@ class TradingEngine:
                 continue
 
             self.stats.entries += 1
+            if verdict is not None:
+                self._entry_verdicts[opportunity.symbol] = verdict
+            if self.intelligence is not None and analysis is not None:
+                try:
+                    context = self.intelligence.build_context(analysis)
+                    self.intelligence.remember(analysis, context)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("could not store market memory: %s", exc)
+
             await self.notifier.trade_opened(
                 position=result.position,
                 proposal=opportunity.proposal,
@@ -816,6 +957,7 @@ class TradingEngine:
 
                 self.stats.exits += 1
                 if position.quantity <= 1e-12:
+                    self._attribute_close(position, action.reason)
                     await self.notifier.trade_closed(
                         position=position,
                         reason=action.reason,
@@ -837,6 +979,39 @@ class TradingEngine:
             await self.emergency_stop("circuit breaker demanded a flatten")
 
         return actions
+
+    def _attribute_close(self, position: Any, reason: str) -> None:
+        """Feed a finished trade back into the models that voted for it.
+
+        Attribution is what makes the dynamic weighting mean anything: a model
+        that keeps being right on trades it voted for earns weight, one that
+        does not loses it.  Failure here is logged and swallowed -- learning is
+        never allowed to interfere with closing a position.
+        """
+
+        verdict = self._entry_verdicts.pop(position.symbol, None)
+        if self.intelligence is None or verdict is None:
+            return
+
+        net = position.realized_pnl - position.fees - position.funding
+        risk = position.risk_amount
+        if risk <= 0:
+            return
+        r_multiple = net / risk
+
+        try:
+            self.intelligence.record_outcome(
+                decision_id=verdict.decision_id,
+                symbol=position.symbol,
+                ensemble=verdict.ensemble,
+                r_multiple=r_multiple,
+                regime=(
+                    verdict.ensemble.regime if verdict.ensemble is not None else "ALL"
+                ),
+                lesson=reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not attribute %s outcome: %s", position.symbol, exc)
 
     async def _build_contexts(
         self, positions: Sequence[ManagedPosition]
@@ -981,6 +1156,70 @@ class TradingEngine:
                 for r in recent
             ],
         }
+
+    # -- intelligence views ------------------------------------------------
+
+    def intelligence_view(self) -> dict[str, Any]:
+        """Model weights, journal and memory statistics."""
+
+        if self.intelligence is None:
+            return {"enabled": False}
+        view = self.intelligence.describe()
+        view["enabled"] = True
+        view["thresholds"] = {
+            "min_trade_quality": self.settings.min_trade_quality,
+            "min_expected_value_r": self.settings.min_expected_value_r,
+            "min_model_agreement": self.settings.min_model_agreement,
+            "max_anomaly_severity": self.settings.max_anomaly_severity,
+            "max_slippage_pct": self.settings.max_slippage_pct,
+        }
+        return view
+
+    def verdicts_view(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Most recent intelligence verdicts, newest first."""
+
+        verdicts = sorted(
+            self.last_verdicts.values(), key=lambda v: v.ts, reverse=True
+        )
+        return [v.as_dict() for v in verdicts[:limit]]
+
+    def verdict_view(self, symbol: str) -> dict[str, Any]:
+        verdict = self.last_verdicts.get(symbol.upper())
+        return verdict.as_dict() if verdict else {}
+
+    def flow_view(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Order flow, microstructure and derivatives per recently-seen symbol."""
+
+        out: list[dict[str, Any]] = []
+        verdicts = sorted(
+            self.last_verdicts.values(), key=lambda v: v.ts, reverse=True
+        )
+        for verdict in verdicts[:limit]:
+            out.append(
+                {
+                    "symbol": verdict.symbol,
+                    "order_flow": (
+                        verdict.order_flow.as_dict() if verdict.order_flow else None
+                    ),
+                    "microstructure": (
+                        verdict.microstructure.as_dict()
+                        if verdict.microstructure
+                        else None
+                    ),
+                    "liquidity": (
+                        verdict.liquidity.as_dict() if verdict.liquidity else None
+                    ),
+                    "derivatives": (
+                        verdict.derivatives.as_dict() if verdict.derivatives else None
+                    ),
+                }
+            )
+        return out
+
+    def journal_view(self, limit: int = 15) -> list[dict[str, Any]]:
+        if self.intelligence is None:
+            return []
+        return [entry.as_dict() for entry in self.intelligence.journal.recent(limit)]
 
     def performance_view(self, days: int = 30) -> dict[str, Any]:
         if not self.repositories:

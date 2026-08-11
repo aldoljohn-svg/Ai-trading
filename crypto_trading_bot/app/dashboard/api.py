@@ -82,6 +82,34 @@ class DashboardRoutes:
     def preflight(self) -> dict[str, Any]:
         return self.engine.preflight_view() if self.engine else {}
 
+    # -- intelligence layer -----------------------------------------------
+
+    def _view(self, name: str, *args: Any, default: Any = None) -> Any:
+        """Call an engine view defensively; the dashboard is read-only."""
+
+        view = getattr(self.engine, name, None) if self.engine else None
+        if not callable(view):
+            return default
+        try:
+            return view(*args)
+        except Exception:  # noqa: BLE001 - a broken panel must not 500 the page
+            return default
+
+    def intelligence(self) -> dict[str, Any]:
+        return self._view("intelligence_view", default={"enabled": False})
+
+    def verdicts(self, limit: int = 10) -> dict[str, Any]:
+        return {"verdicts": self._view("verdicts_view", limit, default=[]) or []}
+
+    def flow(self, limit: int = 10) -> dict[str, Any]:
+        return {"symbols": self._view("flow_view", limit, default=[]) or []}
+
+    def journal(self, limit: int = 20) -> dict[str, Any]:
+        return {"entries": self._view("journal_view", limit, default=[]) or []}
+
+    def decision(self, symbol: str) -> dict[str, Any]:
+        return self._view("verdict_view", symbol, default={}) or {}
+
     def config(self) -> dict[str, Any]:
         """Redacted configuration - secrets are masked, never returned."""
 
@@ -118,6 +146,9 @@ class DashboardRoutes:
             "risk": self.risk(),
             "health": self.engine.health_view() if self.engine else {},
             "performance": self.performance(),
+            "intelligence": self.intelligence(),
+            "verdicts": self.verdicts(6)["verdicts"],
+            "flow": self.flow(6)["symbols"],
         }
 
     # -- mutating ---------------------------------------------------------
@@ -236,6 +267,26 @@ def create_app(engine: Any, settings: Any) -> Any:
     @app.get("/api/config")
     async def config() -> Any:
         return routes.config()
+
+    @app.get("/api/intelligence")
+    async def intelligence() -> Any:
+        return routes.intelligence()
+
+    @app.get("/api/verdicts")
+    async def verdicts(limit: int = Query(10, ge=1, le=60)) -> Any:
+        return routes.verdicts(limit)
+
+    @app.get("/api/flow")
+    async def flow(limit: int = Query(10, ge=1, le=60)) -> Any:
+        return routes.flow(limit)
+
+    @app.get("/api/journal")
+    async def journal(limit: int = Query(20, ge=1, le=100)) -> Any:
+        return routes.journal(limit)
+
+    @app.get("/api/decision/{symbol}")
+    async def decision(symbol: str) -> Any:
+        return routes.decision(symbol)
 
     @app.get("/api/equity")
     async def equity(limit: int = Query(500, ge=10, le=5000)) -> Any:

@@ -361,6 +361,164 @@ BACKTEST_RESULTS = TableSpec(
     indexes=(("created_at",),),
 )
 
+# --------------------------------------------------------------------------
+# Advanced-quant upgrade tables
+# --------------------------------------------------------------------------
+
+DECISION_JOURNAL = TableSpec(
+    name="decision_journal",
+    columns=(
+        _c("id", "PK"),
+        _c("decision_id", "TEXT", null=False),
+        _c("ts", "INT", null=False),
+        _c("kind", "TEXT", null=False),
+        _c("symbol", "TEXT", null=False),
+        _c("mode", "TEXT", null=False, default="'paper'"),
+        _c("timeframe", "TEXT"),
+        _c("side", "TEXT"),
+        _c("decision", "TEXT"),
+        _c("confidence", "REAL", default="0"),
+        _c("entry", "REAL"),
+        _c("stop", "REAL"),
+        _c("tp1", "REAL"),
+        _c("tp2", "REAL"),
+        _c("tp3", "REAL"),
+        _c("risk_amount", "REAL", default="0"),
+        _c("trade_quality", "REAL", default="0"),
+        _c("expected_r", "REAL", default="0"),
+        _c("reasoning", "JSON"),
+        _c("rejections", "JSON"),
+        _c("trace", "JSON"),
+        _c("parent_id", "TEXT"),
+        _c("outcome", "JSON"),
+        _c("lesson", "TEXT"),
+    ),
+    unique=(("decision_id",),),
+    indexes=(("ts",), ("symbol", "ts"), ("kind",), ("parent_id",)),
+)
+
+MODEL_PERFORMANCE = TableSpec(
+    name="model_performance",
+    columns=(
+        _c("id", "PK"),
+        _c("model", "TEXT", null=False),
+        _c("regime", "TEXT", null=False, default="'ALL'"),
+        _c("trades", "INT", null=False, default="0"),
+        _c("wins", "INT", null=False, default="0"),
+        _c("r_sum", "REAL", null=False, default="0"),
+        _c("confidence_sum", "REAL", null=False, default="0"),
+        _c("last_updated", "INT", null=False, default="0"),
+    ),
+    unique=(("model", "regime"),),
+    indexes=(("model",),),
+)
+
+SHADOW_TRADES = TableSpec(
+    name="shadow_trades",
+    columns=(
+        _c("id", "PK"),
+        _c("strategy", "TEXT", null=False),
+        _c("version", "TEXT", null=False, default="'1'"),
+        _c("symbol", "TEXT", null=False),
+        _c("side", "TEXT", null=False),
+        _c("entry", "REAL", null=False),
+        _c("stop", "REAL", null=False),
+        _c("tp1", "REAL"),
+        _c("tp2", "REAL"),
+        _c("tp3", "REAL"),
+        _c("confidence", "REAL", default="0"),
+        _c("regime", "TEXT"),
+        _c("opened_at", "INT", null=False),
+        _c("closed_at", "INT"),
+        _c("exit_price", "REAL"),
+        _c("r_multiple", "REAL", default="0"),
+        _c("mae_r", "REAL", default="0"),
+        _c("mfe_r", "REAL", default="0"),
+        _c("status", "TEXT", null=False, default="'open'"),
+        _c("exit_reason", "TEXT"),
+    ),
+    unique=(("strategy", "symbol", "opened_at"),),
+    indexes=(("strategy", "status"), ("status",)),
+)
+
+STRATEGY_REGISTRY = TableSpec(
+    name="strategy_registry",
+    columns=(
+        _c("id", "PK"),
+        _c("name", "TEXT", null=False),
+        _c("version", "TEXT", null=False, default="'1'"),
+        _c("status", "TEXT", null=False),
+        _c("market", "TEXT", default="'*'"),
+        _c("timeframe", "TEXT", default="'*'"),
+        _c("trades", "INT", null=False, default="0"),
+        _c("wins", "INT", null=False, default="0"),
+        _c("cumulative_r", "REAL", default="0"),
+        _c("max_drawdown_r", "REAL", default="0"),
+        _c("expectancy_r", "REAL", default="0"),
+        _c("profit_factor", "REAL"),
+        _c("regime_stats", "JSON"),
+        _c("created_at", "INT", null=False, default="0"),
+        _c("shadow_since", "INT", default="0"),
+        _c("promoted_at", "INT", default="0"),
+        _c("notes", "JSON"),
+    ),
+    unique=(("name", "version"),),
+    indexes=(("status",),),
+)
+
+MARKET_MEMORY = TableSpec(
+    name="market_memory",
+    columns=(
+        _c("id", "PK"),
+        _c("symbol", "TEXT", null=False),
+        _c("ts", "INT", null=False),
+        _c("timeframe", "TEXT", null=False),
+        _c("regime", "TEXT"),
+        _c("features", "JSON", null=False),
+        _c("forward_return", "REAL"),
+        _c("forward_max_up", "REAL"),
+        _c("forward_max_down", "REAL"),
+        _c("horizon_bars", "INT", default="0"),
+    ),
+    unique=(("symbol", "timeframe", "ts"),),
+    indexes=(("regime",), ("ts",)),
+)
+
+TRADE_EXCURSIONS = TableSpec(
+    name="trade_excursions",
+    columns=(
+        _c("id", "PK"),
+        _c("trade_id", "INT"),
+        _c("symbol", "TEXT", null=False),
+        _c("side", "TEXT", null=False),
+        _c("regime", "TEXT"),
+        _c("session", "TEXT"),
+        _c("strategy", "TEXT"),
+        _c("r_multiple", "REAL", null=False, default="0"),
+        _c("mae_r", "REAL", null=False, default="0"),
+        _c("mfe_r", "REAL", null=False, default="0"),
+        _c("exit_efficiency", "REAL", default="0"),
+        _c("won", "BOOL", null=False, default="0"),
+        _c("closed_at", "INT", null=False),
+    ),
+    indexes=(("symbol",), ("regime",), ("closed_at",)),
+)
+
+AUDIT_LOG = TableSpec(
+    name="audit_log",
+    columns=(
+        _c("id", "PK"),
+        _c("ts", "INT", null=False),
+        _c("actor", "TEXT", null=False),        # system | operator | model
+        _c("action", "TEXT", null=False),
+        _c("target", "TEXT"),
+        _c("before", "JSON"),
+        _c("after", "JSON"),
+        _c("detail", "TEXT"),
+    ),
+    indexes=(("ts",), ("action",), ("actor",)),
+)
+
 TABLES: tuple[TableSpec, ...] = (
     CANDLES,
     FEATURES,
@@ -375,6 +533,14 @@ TABLES: tuple[TableSpec, ...] = (
     SYSTEM_EVENTS,
     MODEL_VERSIONS,
     BACKTEST_RESULTS,
+    # advanced-quant upgrade
+    DECISION_JOURNAL,
+    MODEL_PERFORMANCE,
+    SHADOW_TRADES,
+    STRATEGY_REGISTRY,
+    MARKET_MEMORY,
+    TRADE_EXCURSIONS,
+    AUDIT_LOG,
 )
 
 TABLES_BY_NAME: dict[str, TableSpec] = {t.name: t for t in TABLES}

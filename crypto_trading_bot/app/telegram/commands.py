@@ -39,6 +39,13 @@ COMMANDS: dict[str, str] = {
     "ai": "model status, calibration and recent probabilities",
     "trades": "recent trade history",
     "health": "component health",
+    "models": "per-model weights, reliability and calibration",
+    "flow": "order flow, book depth and derivatives per symbol",
+    "liquidity": "liquidity pools and where price is being pulled",
+    "regime": "current regime per scanned symbol",
+    "journal": "recent decisions with their reasons",
+    "why": "/why SYMBOL - the full decision trace for one symbol",
+    "memory": "what the market memory has learned so far",
     "help": "this list",
 }
 
@@ -392,6 +399,292 @@ class CommandRouter:
             "claims to know what happens next.</i>",
         ]
         return CommandResult(text="\n".join(lines), keyboard=keyboards.refresh_menu("ai"))
+
+    # -- intelligence layer ------------------------------------------------
+
+    def _intelligence(self) -> dict[str, Any]:
+        view = getattr(self.engine, "intelligence_view", None)
+        return view() if callable(view) else {"enabled": False}
+
+    async def _cmd_models(self, args: str, user_id: int) -> CommandResult:
+        data = self._intelligence()
+        if not data.get("enabled"):
+            return CommandResult(
+                text="The intelligence layer is disabled "
+                "(<code>INTELLIGENCE_ENABLED=false</code>).",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        lines = ["🗳 <b>MODEL ENSEMBLE</b>", ""]
+        models = data.get("models", [])
+        if not models:
+            lines.append("No model weights recorded yet.")
+        else:
+            lines.append("<code>model            wt   rel  n   hit</code>")
+            for entry in models[:20]:
+                lines.append(
+                    "<code>{:<15s} {:>4.0%} {:>4.0%} {:>3d} {:>4}</code>".format(
+                        str(entry["model"])[:15],
+                        entry["weight"],
+                        entry["reliability"],
+                        int(entry["trades"]),
+                        f"{entry['hit_rate']:.0%}" if entry["trades"] else "-",
+                    )
+                )
+            drifted = [
+                e for e in models if abs(float(e.get("calibration_gap") or 0)) > 0.1
+            ]
+            if drifted:
+                lines += ["", "<b>Poorly calibrated</b>"]
+                for entry in drifted[:5]:
+                    lines.append(
+                        f"  {entry['model']}: states "
+                        f"{entry['calibration_gap']:+.0%} more confidence than it earns"
+                    )
+
+        thresholds = data.get("thresholds", {})
+        lines += [
+            "",
+            f"Minimum agreement: {_pct(thresholds.get('min_model_agreement'))}",
+            f"Minimum quality: {thresholds.get('min_trade_quality', '-')}/100",
+            f"Minimum EV: {thresholds.get('min_expected_value_r', 0):+.3f}R",
+            "",
+            "<i>Weights are earned from realised outcomes and are bounded, so no "
+            "single model can dominate the vote.</i>",
+        ]
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("models")
+        )
+
+    async def _cmd_flow(self, args: str, user_id: int) -> CommandResult:
+        rows = self._call_view("flow_view", limit=6)
+        if not rows:
+            return CommandResult(
+                text="No order flow captured yet - run a scan first.",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        lines = ["🌊 <b>ORDER FLOW</b>", ""]
+        for row in rows:
+            flow = row.get("order_flow") or {}
+            micro = row.get("microstructure") or {}
+            deriv = row.get("derivatives") or {}
+            lines.append(f"<b>{html.escape(str(row['symbol']))}</b>")
+            if flow:
+                proxy = " <i>(proxy)</i>" if flow.get("cvd_is_proxy") else ""
+                lines.append(
+                    f"  {flow.get('state', '-')} score {flow.get('score', 0):+.2f}"
+                    f" imbalance {_pct(flow.get('book_imbalance'))}{proxy}"
+                )
+            if micro:
+                lines.append(
+                    f"  spread {_pct(micro.get('spread_pct'), 3)}"
+                    f" slip {_pct(micro.get('expected_slippage_pct'), 3)}"
+                    f" {'fillable' if micro.get('fillable') else '<b>NOT fillable</b>'}"
+                )
+                for problem in (micro.get("problems") or [])[:1]:
+                    lines.append(f"  ⚠️ {html.escape(str(problem)[:90])}")
+            if deriv.get("available"):
+                lines.append(
+                    f"  {deriv.get('regime', '-')}"
+                    f" funding {_pct(deriv.get('funding_rate'), 4)}"
+                    + (" 🔥 extreme" if deriv.get("funding_extreme") else "")
+                )
+            lines.append("")
+
+        lines.append(
+            "<i>Without an aggressor tape, CVD is estimated from close location "
+            "and volume. It is labelled a proxy wherever that is the case.</i>"
+        )
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("flow")
+        )
+
+    async def _cmd_liquidity(self, args: str, user_id: int) -> CommandResult:
+        rows = self._call_view("flow_view", limit=6)
+        if not rows:
+            return CommandResult(
+                text="No liquidity map captured yet - run a scan first.",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        lines = ["💧 <b>LIQUIDITY MAP</b>", ""]
+        for row in rows:
+            liquidity = row.get("liquidity") or {}
+            if not liquidity:
+                continue
+            up = float(liquidity.get("pull_up") or 0.0)
+            down = float(liquidity.get("pull_down") or 0.0)
+            lines.append(
+                f"<b>{html.escape(str(row['symbol']))}</b> "
+                f"↑{up:.2f} ↓{down:.2f}"
+            )
+            for pool in (liquidity.get("pools") or [])[:3]:
+                arrow = "↑" if pool.get("side") == "above" else "↓"
+                lines.append(
+                    f"  {arrow} {pool.get('kind', '?')} @ {pool.get('price')} "
+                    f"(strength {pool.get('strength', 0):.2f})"
+                )
+            lines.append("")
+
+        lines.append(
+            "<i>Liquidation levels are modelled from price and open interest, not "
+            "read from the exchange. Treat them as estimates.</i>"
+        )
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("liquidity")
+        )
+
+    async def _cmd_regime(self, args: str, user_id: int) -> CommandResult:
+        opportunities = self.engine.scanner_view(limit=15)
+        if not opportunities:
+            return CommandResult(
+                text="No scan results yet.", keyboard=keyboards.back_to_menu()
+            )
+        counts: dict[str, int] = {}
+        lines = ["🧭 <b>MARKET REGIME</b>", ""]
+        for row in opportunities:
+            regime = str(row.get("regime") or "UNKNOWN")
+            counts[regime] = counts.get(regime, 0) + 1
+            lines.append(
+                f"<b>{html.escape(str(row.get('symbol')))}</b> {regime}"
+                f" — score {float(row.get('opportunity_score') or 0):.0f}"
+            )
+        lines += ["", "<b>Distribution</b>"]
+        for regime, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {regime}: {count}")
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("regime")
+        )
+
+    async def _cmd_journal(self, args: str, user_id: int) -> CommandResult:
+        entries = self._call_view("journal_view", limit=10)
+        if not entries:
+            return CommandResult(
+                text="The decision journal is empty.",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        lines = ["📓 <b>DECISION JOURNAL</b>", ""]
+        for entry in entries:
+            icon = "✅" if entry.get("kind") == "ENTRY" else "⛔"
+            lines.append(
+                f"{icon} <b>{html.escape(str(entry.get('symbol')))}</b> "
+                f"{(entry.get('side') or '-').upper()} "
+                f"quality {entry.get('trade_quality', 0):.0f} "
+                f"EV {entry.get('expected_r', 0):+.2f}R"
+            )
+            detail = (entry.get("rejections") or entry.get("reasoning") or [])[:1]
+            if detail:
+                lines.append(f"   <i>{html.escape(str(detail[0])[:110])}</i>")
+            lines.append(f"   <code>{entry.get('decision_id', '')}</code>")
+
+        lines += [
+            "",
+            "<i>Every decision - including the refusals - is recorded and can be "
+            "replayed with /why SYMBOL.</i>",
+        ]
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("journal")
+        )
+
+    async def _cmd_why(self, args: str, user_id: int) -> CommandResult:
+        symbol = (args or "").strip().upper()
+        if not symbol:
+            return CommandResult(
+                text="Usage: <code>/why BTCUSDT</code>",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        verdict = self._call_view("verdict_view", symbol) or {}
+        if not verdict:
+            return CommandResult(
+                text=f"No recent decision recorded for <b>{html.escape(symbol)}</b>.",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        ensemble = verdict.get("ensemble") or {}
+        quality = verdict.get("trade_quality") or {}
+        ev = verdict.get("expected_value") or {}
+        lines = [
+            f"🔍 <b>{html.escape(symbol)}</b> — "
+            f"{'APPROVED' if verdict.get('approved') else 'NOT TAKEN'}",
+            "",
+            f"Ensemble: {ensemble.get('signal', '-')} "
+            f"({ensemble.get('model_agreement', '-')} agreeing)",
+            f"Confidence: {_pct(ensemble.get('confidence'))}   "
+            f"Participation: {_pct(ensemble.get('participation'))}",
+            f"Quality: {quality.get('score', 0):.0f}/100 ({quality.get('grade', '-')})",
+            f"Expected value: {ev.get('expected_r', 0):+.3f}R "
+            f"at P(win) {_pct(ev.get('win_probability'))}",
+            f"Size influence: {_pct(verdict.get('size_multiplier'))}",
+        ]
+
+        for label, key in (
+            ("Data risk", "data_risk"),
+            ("Model risk", "model_risk"),
+            ("Execution risk", "execution_risk"),
+        ):
+            report = verdict.get(key) or {}
+            if report:
+                lines.append(f"{label}: {report.get('score', 0):.2f}")
+
+        vetoes = verdict.get("veto_reasons") or []
+        rejections = verdict.get("signal_rejections") or []
+        if vetoes or rejections:
+            lines += ["", "<b>Why it was not taken</b>"]
+            for reason in list(rejections)[:3]:
+                lines.append(f"  ✗ signal engine: {html.escape(str(reason)[:120])}")
+            for reason in vetoes[:5]:
+                lines.append(f"  ✗ {html.escape(str(reason)[:130])}")
+        elif verdict.get("approved"):
+            lines += ["", "No objection from any layer."]
+
+        if verdict.get("decision_id"):
+            lines += ["", f"<code>{verdict['decision_id']}</code>"]
+        return CommandResult(text="\n".join(lines), keyboard=keyboards.back_to_menu())
+
+    async def _cmd_memory(self, args: str, user_id: int) -> CommandResult:
+        data = self._intelligence()
+        if not data.get("enabled"):
+            return CommandResult(
+                text="The intelligence layer is disabled.",
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        memory = data.get("memory", {})
+        journal = data.get("journal", {})
+        selectivity = journal.get("selectivity")
+        lines = [
+            "🧠 <b>MARKET MEMORY</b>",
+            "",
+            f"States remembered: {memory.get('states', 0)}",
+            f"Resolved (outcome known): {memory.get('resolved', 0)}",
+            f"Awaiting their horizon: {memory.get('pending', 0)}",
+            f"Symbols: {memory.get('symbols', 0)}",
+            "",
+            "<b>Decision journal</b>",
+            f"Records: {journal.get('records', 0)}",
+            f"Refused: {_pct(selectivity) if selectivity is not None else '-'}",
+            f"Average quality of entries: {journal.get('avg_trade_quality') or '-'}",
+            "",
+            "<i>Only resolved states can teach anything; pending ones are held "
+            "back until their outcome is known.</i>",
+        ]
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("memory")
+        )
+
+    def _call_view(self, name: str, *args: Any, **kwargs: Any) -> Any:
+        """Call an engine view if it exists, tolerating an older engine."""
+
+        view = getattr(self.engine, name, None)
+        if not callable(view):
+            return None
+        try:
+            return view(*args, **kwargs)
+        except Exception:  # noqa: BLE001 - a broken view must not break Telegram
+            return None
 
     async def _cmd_signals(self, args: str, user_id: int) -> CommandResult:
         signals = self.engine.signals_view(limit=12)

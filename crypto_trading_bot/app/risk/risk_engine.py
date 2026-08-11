@@ -127,7 +127,16 @@ class RiskEngine:
         spec: ContractSpec,
         regime_risk_multiplier: float | None = None,
         breaker_report: BreakerReport | None = None,
+        intelligence_scale: float = 1.0,
     ) -> RiskDecision:
+        """Size and approve an entry.
+
+        ``intelligence_scale`` is the advanced intelligence layer's influence on
+        size.  It is clamped to ``[0, 1]`` here rather than trusted, so that
+        layer can only ever *shrink* a position — no downstream component is
+        permitted to raise risk above what this engine computed.
+        """
+
         settings = self.settings
         decision = RiskDecision(proposal=proposal, ts=int(time.time()))
 
@@ -173,6 +182,13 @@ class RiskEngine:
         if multiplier <= 0:
             decision.reject(
                 f"{proposal.regime.value} regime sets the risk multiplier to zero"
+            )
+
+        scale = min(1.0, max(0.0, intelligence_scale))
+        if scale < 0.999:
+            multiplier *= scale
+            decision.reasons.append(
+                f"size scaled to {scale:.0%} by the intelligence layer"
             )
 
         # Never scale risk *up* after losses; only ever down.

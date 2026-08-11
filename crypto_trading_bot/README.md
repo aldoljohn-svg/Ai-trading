@@ -38,10 +38,11 @@ Telegram and a live web dashboard.
 15. [Emergency stop & kill switch](#15-emergency-stop--kill-switch)
 16. [Day-to-day operations](#16-day-to-day-operations)
 17. [How it decides](#17-how-it-decides)
-18. [Troubleshooting](#18-troubleshooting)
-19. [Security checklist](#19-security-checklist)
-20. [Project layout](#20-project-layout)
-21. [Known limitations](#21-known-limitations)
+18. [The intelligence layer](#18-the-intelligence-layer)
+19. [Troubleshooting](#19-troubleshooting)
+20. [Security checklist](#20-security-checklist)
+21. [Project layout](#21-project-layout)
+22. [Known limitations](#22-known-limitations)
 
 ---
 
@@ -55,8 +56,11 @@ Telegram and a live web dashboard.
 4. Deep-analyses those on 5m/15m/30m/1h/4h/1d concurrently.
 5. Runs indicators, market structure, ICT, RTM, regime detection and fundamentals.
 6. Produces a scored, explained proposal for every symbol — including rejections.
-7. Sends approved proposals to the risk engine, which decides size or refuses.
-8. Executes only what survives every gate.
+7. Puts each proposal to an ensemble of 16 independent models, scores data,
+   model and execution risk, and asks a no-trade model whether to stand down.
+8. Sends survivors to the risk engine, which decides size or refuses.
+9. Executes only what survives every gate, and journals every decision — the
+   refusals as carefully as the entries (`/why SYMBOL` replays any of them).
 
 **Every few seconds:** each open position is re-evaluated for stops, targets,
 break-even, trailing, structural invalidation and portfolio-level de-risking.
@@ -347,6 +351,11 @@ component health.
 | `/api/status`, `/api/account`, `/api/positions` | state |
 | `/api/scanner`, `/api/signals`, `/api/trades`, `/api/orders` | activity |
 | `/api/risk`, `/api/ai`, `/api/performance`, `/api/preflight` | analysis |
+| `/api/intelligence` | model weights, journal and memory statistics |
+| `/api/verdicts` | recent intelligence verdicts, newest first |
+| `/api/flow` | order flow, microstructure, liquidity, derivatives |
+| `/api/journal` | recent decisions including the refusals |
+| `/api/decision/{symbol}` | the full decision trace for one symbol |
 | `/api/config` | configuration, **secrets masked** |
 | `/api/equity` | equity curve |
 | `/ws` | live push (FastAPI installs only) |
@@ -385,6 +394,13 @@ and set `DASHBOARD_TOKEN` so the control endpoints require a token.
 | `/ai` | model status, calibration quality, recent probabilities |
 | `/trades` | trade history |
 | `/health` | component health |
+| `/models` | per-model weight, reliability, sample size and calibration |
+| `/flow` | order flow, book depth, slippage estimate and derivatives |
+| `/liquidity` | liquidity pools and which side price is being pulled toward |
+| `/regime` | current regime per scanned symbol |
+| `/journal` | recent decisions — including the refusals — with their reasons |
+| `/why SYMBOL` | the full decision trace for one symbol |
+| `/memory` | what the market memory has learned so far |
 | `/help` | this list |
 
 The main menu mirrors these as buttons:
@@ -400,6 +416,8 @@ Status: 🟢 RUNNING
 [🚨 EMERGENCY STOP]
 [💰 ACCOUNT] [📊 PERFORMANCE]
 [🧠 AI] [⚙️ RISK]
+[🗳 MODELS] [🌊 FLOW]
+[🧭 REGIME] [📓 JOURNAL]
 ```
 
 Every trade sends a full report on entry (equity, risk %, risk amount, size,
@@ -717,7 +735,194 @@ FOMC, NFP and similar:
 
 ---
 
-## 18. Troubleshooting
+## 18. The intelligence layer
+
+Everything in section 17 is the **signal engine**. This section is the layer that
+sits on top of it.
+
+The rule that governs the whole layer, and the reason it is safe to add to a
+system that already trades:
+
+> It can **veto** a trade and it can **shrink** a position.
+> It can never create a trade the signal engine rejected, never raise size, and
+> never relax a risk limit.
+
+That is enforced in two places, not one: the coordinator only ever approves when
+`proposal.decision is ENTER`, and the risk engine clamps the layer's size
+influence into `[0, 1]` before applying it. Set `INTELLIGENCE_ENABLED=false` and
+the bot behaves exactly as it did before the upgrade — less selective, not more
+capable.
+
+### The ensemble
+
+Sixteen independent models vote: technical, price action, market structure, ICT,
+RTM, momentum, mean reversion, regime, order flow, liquidity, derivatives, macro,
+news, sentiment, machine learning, and a portfolio-risk model that is never
+allowed to be directional.
+
+Three details matter more than the list:
+
+- **Abstention is not a vote.** `NO_SIGNAL` (the model had no usable data) is a
+  distinct state from `NEUTRAL` (the model looked and saw nothing). A model that
+  cannot see is excluded from the tally rather than counted as a shrug.
+- **Confidence is discounted by data quality.** A model's effective weight in the
+  vote is `confidence × data_quality`, so a confident opinion formed on thin data
+  carries less than a measured one formed on good data.
+- **A crash is an abstention.** Every model runs through `safe_evaluate`, so one
+  broken model degrades the vote instead of taking down the scan.
+
+Ensemble confidence is `margin × agreement × (0.5 + 0.5 × participation)`. All
+three terms have to be there: a narrow win, a split vote, or a vote most models
+sat out are each reasons to be less sure, not more.
+
+### Dynamic weighting
+
+Weights are earned from realised outcomes, per regime. Reliability uses
+Beta-Binomial shrinkage — one win is not a 100% hit rate — and every weight is
+bounded to `[0.02, 0.25]` and renormalised, so no single model can dominate and
+none is ever fully silenced. A model that consistently states more confidence
+than it earns is damped.
+
+When a trade loses, the models that **dissented** are credited. That is what
+stops the weighting from simply reinforcing the majority.
+
+### The no-trade model
+
+A first-class model whose output is "don't", combined by noisy-OR across:
+no direction, weak conviction, model disagreement, thin participation, poor data
+quality, data risk, hostile conditions, execution risk, regime block, regime
+caution, poor reward:risk, and an active loss cluster.
+
+This exists because **preferring no trade over a low-quality trade is a strategy,
+not an absence of one**, and it deserves to be modelled explicitly rather than
+falling out of a pile of thresholds.
+
+### Risk scores
+
+Three independent scores, each `[0, 1]`, each with a hard limit above which the
+trade is blocked outright:
+
+| Score | Hard limit | What it measures |
+|---|---|---|
+| Data risk | 0.70 | missing timeframes, stale bars, thin history, validation failures, price anomalies, provider error rate |
+| Model risk | 0.75 | disagreement, thin participation, poor calibration, drift, unproven regime |
+| Execution risk | 0.70 | spread, estimated slippage, depth, cost against expected reward, latency, exchange health |
+
+They feed the trade-quality score as a **multiplicative penalty only** — a low
+risk score can never push quality up.
+
+### Trade quality and expected value
+
+Quality blends signal, regime fit, order flow, liquidity, reward:risk and
+portfolio headroom into one comparable 0–100 figure, then applies the risk
+penalties. Entries need `MIN_TRADE_QUALITY`.
+
+Expected value is computed in R, net of fees, spread and estimated slippage, and
+accounts for the partial-exit ladder — scaling out lowers the average win, and
+pretending otherwise inflates EV. Confidence is **shrunk toward the base rate**
+until there is enough calibration history to justify it, so a fresh install
+cannot talk itself into a trade on a self-reported 90%.
+
+### Order flow, microstructure and liquidity
+
+- **Order flow** — book imbalance and cumulative delta. MEXC's public feed has no
+  aggressor tape, so CVD is estimated from volume-weighted close location and is
+  **labelled a proxy** everywhere it appears, with data quality reduced to match.
+- **Microstructure** — the book is walked level by level to estimate real
+  slippage for the intended size. An order that would consume more than the book
+  can supply is reported as not fillable rather than optimistically sized.
+- **Liquidity pools** — volume nodes, equal highs/lows, swings, book
+  concentrations, and modelled liquidation clusters. Liquidation levels are
+  **estimates derived from price and open interest, not exchange data**, and are
+  labelled as such. A direction is only reported when one side holds ≥ 60% of
+  nearby liquidity.
+- **Derivatives** — funding and open interest, classified into
+  NEW_LONGS / SHORT_COVERING / NEW_SHORTS / LONG_LIQUIDATION.
+
+### Safety
+
+The **multi-layer kill switch** reports the maximum level any trigger demands:
+
+| Level | Effect |
+|---|---|
+| 0 NONE | normal |
+| 1 STOP_NEW_TRADES | manage what is open, open nothing |
+| 2 REDUCE_SIZE | halve size on anything new |
+| 3 CLOSE_RISKY | close the worst positions |
+| 4 CLOSE_ALL | flatten |
+| 5 DISABLE_LIVE | live trading off until a human clears it |
+
+No code path lowers a level except an explicit human reset, and level 5 requires
+`human_reset(clear_live_disable=True)` specifically. Loss-driven triggers are
+sticky: the daily loss limit does not un-trip because the next candle was green.
+
+The **anomaly detector** scores ten conditions against each symbol's own recent
+distribution rather than fixed thresholds, and declares a black swan when two or
+more are severe. The **behaviour guard** manages recovery modes — every recovery
+state can only reduce risk, enforced by a clamp that all callers route through,
+so there is no path by which drawdown leads to bigger positions.
+
+### Governance
+
+- **Leakage guards** — assert that every bar used had closed before the decision
+  timestamp, that timestamps are grid-aligned, and that no feature carries a
+  future timestamp.
+- **Champion / challenger** — a challenger is promoted only if it passes *every*
+  criterion: sample size, shadow duration, expectancy margin over the champion,
+  profit factor, drawdown tolerance and positive-regime share. All-or-nothing, so
+  one spectacular number cannot carry a weak record.
+- **Shadow book** — records hypothetical trades and holds no broker, no exchange
+  and no credentials. It structurally cannot trade.
+- **Drift detection** — two-proportion z-test of a recent window against the
+  long-run baseline, with an explicit "not enough evidence" outcome.
+- **Overfitting detector** — seven checks, and results that are simply implausible
+  (win rate > 85%, Sharpe > 5) are always rejected regardless of what else passes.
+
+### Memory
+
+- **Decision journal** — append-only, ten pipeline stages captured per decision.
+  Outcomes are recorded as *new linked records*, never as edits to the original,
+  so the reasoning is preserved as it was at the time. `/why SYMBOL` replays it.
+  Refusals are journalled as carefully as entries.
+- **MAE/MFE** — measures how far each trade went against and in favour before
+  resolving, and produces stop and target **suggestions for a human to review**.
+  Nothing applies them automatically; the payload literally carries
+  `"applied": false`.
+- **Market memory** — remembers the market state at each decision and finds
+  historical analogues by Euclidean distance on standardised features. Only
+  *resolved* states — ones whose outcome is known — can teach anything.
+- **Trade clustering** — groups closed trades by session, weekday, regime and
+  symbol, and detects conditions that are systematically losing over the recent
+  window, so a bad patch six months ago does not haunt the present.
+
+### Portfolio
+
+Correlation clusters are **measured, not labelled**. "L1", "DeFi" and "meme" stop
+describing reality exactly when it matters — in a liquidation cascade every
+category becomes one trade — so clustering is single-linkage agglomerative over
+measured correlation, taking the **worst case across 30/60/90/180-bar windows**.
+Unknown pairs default to 0.6 correlation, because assuming independence is the
+expensive mistake.
+
+Stress testing applies six scenarios to the live book, and Monte Carlo bootstraps
+the historical R distribution to estimate drawdown and risk of ruin — resampling
+with replacement, which preserves the distribution's shape while destroying its
+ordering, because the question is how bad an unlucky *sequence* of the same
+trades could be.
+
+### What this layer will not do
+
+- It will not claim to predict the market. Everything above produces estimates
+  with stated uncertainty.
+- It will not raise a hard limit. `MAX_DAILY_LOSS`, `MAX_DRAWDOWN_STOP`,
+  `MAX_LEVERAGE`, `MAX_OPEN_POSITIONS`, the emergency stop and the kill switch
+  are above it in the hierarchy and are not writable by it.
+- It will not let social media trigger a trade. Sentiment is one damped vote
+  among sixteen and can only ever reduce conviction.
+
+---
+
+## 19. Troubleshooting
 
 **Bot will not start**
 ```bash
@@ -765,7 +970,7 @@ docker compose run --rm bot python scripts/healthcheck.py
 
 ---
 
-## 19. Security checklist
+## 20. Security checklist
 
 - [ ] `.env` has `chmod 600` and is never committed (`.gitignore` covers it)
 - [ ] MEXC key has **futures only**, **no withdrawal**
@@ -786,7 +991,7 @@ registered.
 
 ---
 
-## 20. Project layout
+## 21. Project layout
 
 ```
 crypto_trading_bot/
@@ -808,8 +1013,15 @@ crypto_trading_bot/
 │   ├── scanner/                 universe, deep analysis, ranking
 │   ├── signals/                 scoring, signal engine, trade proposal
 │   ├── ml/                      features, dataset, train, calibrate, predict
+│   ├── intelligence.py          the coordinator: veto + size, never permit
+│   ├── ensemble/                16 models, dynamic weighting, no-trade model
+│   ├── orderflow/               flow, microstructure, liquidity, derivatives
+│   ├── quality/                 data/model/execution risk, quality, EV
+│   ├── safety/                  kill switch, anomaly, fail-safe, behaviour
+│   ├── governance/              leakage, registry, shadow, drift, overfitting
+│   ├── memory/                  journal, MAE/MFE, market memory, clustering
 │   ├── risk/                    sizing, portfolio risk, breakers, risk engine
-│   ├── portfolio/               positions and account state
+│   ├── portfolio/               positions, correlation clusters, stress tests
 │   ├── execution/               order manager, execution engine, reconciliation
 │   ├── position_manager/        stops, targets, trailing, live management
 │   ├── backtest/                engine, metrics, walk-forward
@@ -818,7 +1030,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       344 tests
+├── tests/                       431 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt
@@ -835,7 +1047,7 @@ pytest -q
 
 ---
 
-## 21. Known limitations
+## 22. Known limitations
 
 Stated plainly, because you are trusting this with money:
 
@@ -857,6 +1069,19 @@ Stated plainly, because you are trusting this with money:
   simultaneously the realised loss is the gross sum, which is why the cluster cap
   uses gross risk.
 - **Single-process, single-account.** No multi-account or multi-exchange support.
+- **CVD is a proxy.** MEXC's public feed carries no aggressor tape, so cumulative
+  delta is estimated from close location and volume. It is labelled as a proxy
+  wherever it is shown, and its data quality is reduced accordingly.
+- **Liquidation levels are modelled, not observed.** They are inferred from price
+  and open interest, and are not exchange data.
+- **Model weights start uninformed.** Until a few dozen trades have resolved, the
+  dynamic weighting is close to uniform and the reliability figures are dominated
+  by the prior. The ensemble is not "trained" out of the box.
+- **The market memory needs resolved history.** Analogues only draw on states
+  whose outcome is known, so it contributes nothing on a fresh install.
+- **Champion/challenger and shadow mode ship as machinery, not as a running
+  process.** The registry, shadow book and promotion test exist and are tested;
+  wiring a specific challenger strategy into a shadow schedule is left to you.
 
 ---
 

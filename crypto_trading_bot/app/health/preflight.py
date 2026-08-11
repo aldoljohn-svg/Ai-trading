@@ -288,6 +288,23 @@ async def run_preflight(
 
     await _check(report, "risk configuration", False, check_risk)
 
+    # --- 13. intelligence layer --------------------------------------------
+    async def check_intelligence() -> tuple[bool, str]:
+        if not getattr(settings, "intelligence_enabled", False):
+            return False, (
+                "the intelligence layer is disabled - trades are gated by the "
+                "signal engine alone, with no ensemble, no-trade model or "
+                "trade-quality check"
+            )
+        return True, (
+            f"quality >= {settings.min_trade_quality:.0f}/100, "
+            f"EV >= {settings.min_expected_value_r:+.3f}R, "
+            f"agreement >= {settings.min_model_agreement:.0%}, "
+            f"no-trade threshold {settings.no_trade_threshold:.2f}"
+        )
+
+    await _check(report, "intelligence layer", False, check_intelligence)
+
     if settings.is_live:
         if report.passed:
             log.warning(

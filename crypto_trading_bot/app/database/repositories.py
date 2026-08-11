@@ -660,6 +660,315 @@ class BacktestRepository:
         return rows
 
 
+class JournalRepository:
+    """Append-only decision journal. Rows are inserted, never updated."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def append(self, record: dict[str, Any]) -> int:
+        row = {
+            "decision_id": record["decision_id"],
+            "ts": int(record.get("ts", _now())),
+            "kind": record.get("kind", "NO_TRADE"),
+            "symbol": record.get("symbol", ""),
+            "mode": record.get("mode", "paper"),
+            "timeframe": record.get("timeframe"),
+            "side": record.get("side"),
+            "decision": record.get("decision"),
+            "confidence": float(record.get("confidence", 0.0) or 0.0),
+            "entry": record.get("entry"),
+            "stop": record.get("stop"),
+            "tp1": record.get("tp1"),
+            "tp2": record.get("tp2"),
+            "tp3": record.get("tp3"),
+            "risk_amount": float(record.get("risk_amount", 0.0) or 0.0),
+            "trade_quality": float(record.get("trade_quality", 0.0) or 0.0),
+            "expected_r": float(record.get("expected_r", 0.0) or 0.0),
+            "reasoning": dumps(record.get("reasoning", [])),
+            "rejections": dumps(record.get("rejections", [])),
+            "trace": dumps(record.get("trace", {})),
+            "parent_id": record.get("parent_id") or None,
+            "outcome": dumps(record.get("outcome", {})),
+            "lesson": record.get("lesson") or None,
+        }
+        return self.db.upsert("decision_journal", row, conflict=("decision_id",))
+
+    def get(self, decision_id: str) -> dict[str, Any] | None:
+        row = self.db.query_one(
+            "SELECT * FROM decision_journal WHERE decision_id=?", (decision_id,)
+        )
+        return _decode_journal(row) if row else None
+
+    def recent(
+        self, limit: int = 30, symbol: str | None = None, kind: str | None = None
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM decision_journal WHERE 1=1"
+        params: list[Any] = []
+        if symbol:
+            sql += " AND symbol=?"
+            params.append(symbol)
+        if kind:
+            sql += " AND kind=?"
+            params.append(kind)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        return [_decode_journal(r) for r in self.db.query(sql, params)]
+
+    def children(self, parent_id: str) -> list[dict[str, Any]]:
+        return [
+            _decode_journal(r)
+            for r in self.db.query(
+                "SELECT * FROM decision_journal WHERE parent_id=? ORDER BY ts",
+                (parent_id,),
+            )
+        ]
+
+
+def _decode_journal(row: dict[str, Any]) -> dict[str, Any]:
+    for key, default in (
+        ("reasoning", []),
+        ("rejections", []),
+        ("trace", {}),
+        ("outcome", {}),
+    ):
+        row[key] = loads(row.get(key), default)
+    return row
+
+
+class ModelPerformanceRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def save(self, record: dict[str, Any]) -> int:
+        return self.db.upsert(
+            "model_performance",
+            {
+                "model": record["model"],
+                "regime": record.get("regime", "ALL"),
+                "trades": int(record.get("trades", 0)),
+                "wins": int(record.get("wins", 0)),
+                "r_sum": float(record.get("r_sum", 0.0)),
+                "confidence_sum": float(record.get("confidence_sum", 0.0)),
+                "last_updated": int(record.get("last_updated", _now())),
+            },
+            conflict=("model", "regime"),
+        )
+
+    def save_many(self, records: Sequence[dict[str, Any]]) -> int:
+        count = 0
+        for record in records:
+            # ``as_dict`` emits derived fields; keep only what the table stores.
+            self.save(
+                {
+                    "model": record["model"],
+                    "regime": record.get("regime", "ALL"),
+                    "trades": record.get("trades", 0),
+                    "wins": record.get("wins", 0),
+                    "r_sum": record.get("r_sum", record.get("expectancy_r", 0.0)
+                                        * max(record.get("trades", 0), 1)),
+                    "confidence_sum": record.get("confidence_sum", 0.0),
+                    "last_updated": record.get("last_updated", _now()),
+                }
+            )
+            count += 1
+        return count
+
+    def all(self) -> list[dict[str, Any]]:
+        return self.db.query("SELECT * FROM model_performance")
+
+
+class ShadowRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def save(self, trade: dict[str, Any]) -> int:
+        return self.db.upsert(
+            "shadow_trades",
+            {
+                "strategy": trade["strategy"],
+                "version": trade.get("version", "1"),
+                "symbol": trade["symbol"],
+                "side": trade["side"],
+                "entry": float(trade["entry"]),
+                "stop": float(trade["stop"]),
+                "tp1": trade.get("tp1"),
+                "tp2": trade.get("tp2"),
+                "tp3": trade.get("tp3"),
+                "confidence": float(trade.get("confidence", 0.0)),
+                "regime": trade.get("regime"),
+                "opened_at": int(trade["opened_at"]),
+                "closed_at": trade.get("closed_at") or None,
+                "exit_price": trade.get("exit_price"),
+                "r_multiple": float(trade.get("r_multiple", 0.0)),
+                "mae_r": float(trade.get("mae_r", 0.0)),
+                "mfe_r": float(trade.get("mfe_r", 0.0)),
+                "status": trade.get("status", "open"),
+                "exit_reason": trade.get("exit_reason"),
+            },
+            conflict=("strategy", "symbol", "opened_at"),
+        )
+
+    def closed(self, strategy: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM shadow_trades WHERE status='closed'"
+        params: list[Any] = []
+        if strategy:
+            sql += " AND strategy=?"
+            params.append(strategy)
+        sql += " ORDER BY closed_at DESC LIMIT ?"
+        params.append(limit)
+        return self.db.query(sql, params)
+
+
+class StrategyRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def save(self, record: dict[str, Any]) -> int:
+        return self.db.upsert(
+            "strategy_registry",
+            {
+                "name": record["name"],
+                "version": record.get("version", "1"),
+                "status": record.get("status", "CANDIDATE"),
+                "market": record.get("market", "*"),
+                "timeframe": record.get("timeframe", "*"),
+                "trades": int(record.get("trades", 0)),
+                "wins": int(record.get("wins", 0)),
+                "cumulative_r": float(record.get("cumulative_r", 0.0)),
+                "max_drawdown_r": float(record.get("max_drawdown_r", 0.0)),
+                "expectancy_r": float(record.get("expectancy_r", 0.0)),
+                "profit_factor": record.get("profit_factor"),
+                "regime_stats": dumps(record.get("regime_expectancy", {})),
+                "created_at": int(record.get("created_at", _now())),
+                "shadow_since": int(record.get("shadow_since", 0) or 0),
+                "promoted_at": int(record.get("promoted_at", 0) or 0),
+                "notes": dumps(record.get("notes", [])),
+            },
+            conflict=("name", "version"),
+        )
+
+    def all(self) -> list[dict[str, Any]]:
+        rows = self.db.query("SELECT * FROM strategy_registry ORDER BY name, version")
+        for row in rows:
+            row["regime_stats"] = loads(row.get("regime_stats"), {})
+            row["notes"] = loads(row.get("notes"), [])
+        return rows
+
+
+class MarketMemoryRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def save(self, state: dict[str, Any]) -> int:
+        return self.db.upsert(
+            "market_memory",
+            {
+                "symbol": state["symbol"],
+                "ts": int(state["ts"]),
+                "timeframe": state.get("timeframe", ""),
+                "regime": state.get("regime"),
+                "features": dumps(state.get("features", {})),
+                "forward_return": state.get("forward_return"),
+                "forward_max_up": state.get("forward_max_up"),
+                "forward_max_down": state.get("forward_max_down"),
+                "horizon_bars": int(state.get("horizon_bars", 0) or 0),
+            },
+            conflict=("symbol", "timeframe", "ts"),
+        )
+
+    def recent(self, limit: int = 20000) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT * FROM market_memory ORDER BY ts DESC LIMIT ?", (limit,)
+        )
+        for row in rows:
+            row["features"] = loads(row.get("features"), {})
+        rows.reverse()
+        return rows
+
+    def unresolved(self, older_than_ts: int, limit: int = 500) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT * FROM market_memory WHERE forward_return IS NULL AND ts <= ? "
+            "ORDER BY ts LIMIT ?",
+            (older_than_ts, limit),
+        )
+        for row in rows:
+            row["features"] = loads(row.get("features"), {})
+        return rows
+
+
+class ExcursionRepository:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def save(self, excursion: dict[str, Any]) -> int:
+        return self.db.insert(
+            "trade_excursions",
+            {
+                "trade_id": excursion.get("trade_id"),
+                "symbol": excursion["symbol"],
+                "side": excursion["side"],
+                "regime": excursion.get("regime"),
+                "session": excursion.get("session"),
+                "strategy": excursion.get("strategy"),
+                "r_multiple": float(excursion.get("r_multiple", 0.0)),
+                "mae_r": float(excursion.get("mae_r", 0.0)),
+                "mfe_r": float(excursion.get("mfe_r", 0.0)),
+                "exit_efficiency": float(excursion.get("exit_efficiency", 0.0)),
+                "won": 1 if excursion.get("won") else 0,
+                "closed_at": int(excursion.get("closed_at", _now())),
+            },
+        )
+
+    def all(self, limit: int = 2000) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM trade_excursions ORDER BY closed_at DESC LIMIT ?", (limit,)
+        )
+
+
+class AuditRepository:
+    """Append-only audit log of every consequential action."""
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def log(
+        self,
+        actor: str,
+        action: str,
+        target: str = "",
+        before: Any = None,
+        after: Any = None,
+        detail: str = "",
+    ) -> int:
+        return self.db.insert(
+            "audit_log",
+            {
+                "ts": _now(),
+                "actor": actor,
+                "action": action,
+                "target": target or None,
+                "before": dumps(before) if before is not None else None,
+                "after": dumps(after) if after is not None else None,
+                "detail": detail or None,
+            },
+        )
+
+    def recent(self, limit: int = 100, action: str | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM audit_log"
+        params: list[Any] = []
+        if action:
+            sql += " WHERE action=?"
+            params.append(action)
+        sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = self.db.query(sql, params)
+        for row in rows:
+            row["before"] = loads(row.get("before"), None)
+            row["after"] = loads(row.get("after"), None)
+        return rows
+
+
 class Repositories:
     """Convenience bundle passed around the application."""
 
@@ -677,6 +986,14 @@ class Repositories:
         self.events = EventRepository(db)
         self.models = ModelRepository(db)
         self.backtests = BacktestRepository(db)
+        # advanced-quant upgrade
+        self.journal = JournalRepository(db)
+        self.model_performance = ModelPerformanceRepository(db)
+        self.shadow = ShadowRepository(db)
+        self.strategies = StrategyRepository(db)
+        self.memory = MarketMemoryRepository(db)
+        self.excursions = ExcursionRepository(db)
+        self.audit = AuditRepository(db)
 
 
 __all__ = [
@@ -693,4 +1010,11 @@ __all__ = [
     "EventRepository",
     "ModelRepository",
     "BacktestRepository",
+    "JournalRepository",
+    "ModelPerformanceRepository",
+    "ShadowRepository",
+    "StrategyRepository",
+    "MarketMemoryRepository",
+    "ExcursionRepository",
+    "AuditRepository",
 ]

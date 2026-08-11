@@ -311,6 +311,28 @@ class Settings:
     health_interval_seconds: float = 30.0
     telegram_poll_timeout: int = 25
 
+    # --- intelligence layer ----------------------------------------------
+    #: Master switch for the advanced quant / institutional layer.  When off the
+    #: bot behaves exactly as it did before the upgrade: the signal engine's
+    #: verdict stands on its own.  When on, the intelligence layer may only ever
+    #: *reject* or *shrink* a trade the signal engine already approved.
+    intelligence_enabled: bool = True
+    #: Noisy-OR probability above which the no-trade model vetoes.  Lower =
+    #: fussier.  "Prefer no trade over a low quality trade."
+    no_trade_threshold: float = 0.5
+    #: Minimum share of participating models that must agree on direction.
+    min_model_agreement: float = 0.60
+    #: Estimated slippage (as a fraction) above which execution risk is fatal.
+    max_slippage_pct: float = 0.0035
+    #: Minimum composite trade-quality score (0-100) required to enter.
+    min_trade_quality: float = 55.0
+    #: Minimum shrunk expected value, in R, required to enter.
+    min_expected_value_r: float = 0.05
+    #: Anomaly severity (0-1) at or above which entries are blocked.
+    max_anomaly_severity: float = 0.65
+    #: Require the ensemble to agree with the signal engine's direction.
+    require_ensemble_agreement: bool = True
+
     # --- safety ----------------------------------------------------------
     live_confirm_phrase: str = ""
     kill_switch_file: str = "data/KILL_SWITCH"
@@ -491,6 +513,10 @@ _FRACTION_FIELDS = {
     "min_stop_pct": (0.0, 1.0),
     "ml_weight": (0.0, 1.0),
     "max_position_notional_pct": (0.0, 10.0),
+    "no_trade_threshold": (0.05, 0.95),
+    "min_model_agreement": (0.0, 1.0),
+    "max_slippage_pct": (0.0, 0.05),
+    "max_anomaly_severity": (0.0, 1.0),
 }
 
 
@@ -535,6 +561,15 @@ def validate(settings: Settings) -> Settings:
         errors.append("min_rr must be >= 1.0; sub-1R targets are rejected")
     if settings.min_rr > 20:
         errors.append("min_rr > 20 is unrealistic and would block all trades")
+    if not (0.0 <= settings.min_trade_quality <= 100.0):
+        errors.append("min_trade_quality must be within [0, 100]")
+    if settings.min_expected_value_r < 0:
+        errors.append(
+            "min_expected_value_r must be >= 0; a negative expectancy threshold "
+            "would admit trades the bot expects to lose"
+        )
+    if settings.min_expected_value_r > 5:
+        errors.append("min_expected_value_r > 5R is unrealistic and blocks all trades")
     if settings.min_atr_pct >= settings.max_atr_pct:
         errors.append("min_atr_pct must be < max_atr_pct")
     if settings.min_stop_pct >= settings.max_stop_pct:

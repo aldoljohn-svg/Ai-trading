@@ -40,6 +40,14 @@ def main_menu() -> dict[str, Any]:
                 _button("🧠 AI", "cmd:ai"),
                 _button("⚙️ RISK", "cmd:risk"),
             ],
+            [
+                _button("🗳 MODELS", "cmd:models"),
+                _button("🌊 FLOW", "cmd:flow"),
+            ],
+            [
+                _button("🧭 REGIME", "cmd:regime"),
+                _button("📓 JOURNAL", "cmd:journal"),
+            ],
         ]
     }
 

@@ -13,8 +13,9 @@ books.  Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import statistics
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Sequence
 
 from app.data.candle_store import CandleStore
@@ -33,6 +34,21 @@ class MarketDataStats:
     validation_failures: int = 0
     last_success_ts: float = 0.0
     last_error: str = ""
+    #: Round-trip time of recent candle fetches, in milliseconds.  Kept as a
+    #: short window so the median is a live reading rather than a lifetime
+    #: average that hides a degradation happening right now.
+    latencies_ms: list[float] = field(default_factory=list)
+
+    def record_latency(self, milliseconds: float, window: int = 50) -> None:
+        self.latencies_ms.append(milliseconds)
+        if len(self.latencies_ms) > window:
+            del self.latencies_ms[:-window]
+
+    @property
+    def median_latency_ms(self) -> float:
+        if not self.latencies_ms:
+            return 0.0
+        return statistics.median(self.latencies_ms)
 
 
 class MarketData:
@@ -112,12 +128,14 @@ class MarketData:
     ) -> list[Candle]:
         async with self._semaphore:
             self.stats.fetches += 1
+            started = time.perf_counter()
             try:
                 fetched = await self.exchange.candles(symbol, timeframe, limit=limit)
             except ExchangeError as exc:
                 self.stats.failures += 1
                 self.stats.last_error = f"{symbol} {timeframe.value}: {exc}"
                 raise
+            self.stats.record_latency((time.perf_counter() - started) * 1000.0)
 
         result = validate_candles(
             fetched,
@@ -228,6 +246,7 @@ class MarketData:
             "failures": self.stats.failures,
             "validation_failures": self.stats.validation_failures,
             "seconds_since_success": round(age, 1) if age is not None else None,
+            "median_latency_ms": round(self.stats.median_latency_ms, 1),
             "last_error": self.stats.last_error,
             "cache": self.store.stats(),
         }
