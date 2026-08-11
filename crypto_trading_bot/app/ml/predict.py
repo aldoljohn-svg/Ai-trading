@@ -206,19 +206,29 @@ class Predictor:
         self, artifact: ModelArtifact, vector: list[float]
     ) -> list[float]:
         model = artifact.runtime
-        if hasattr(model, "predict_proba"):
-            if artifact.algorithm.startswith("softmax"):
-                return model.predict_proba([vector])[0]
-            payload = numpy.array([vector]) if HAVE_NUMPY else [vector]
-            raw = model.predict_proba(payload)[0]
-            classes = list(getattr(model, "classes_", [LABEL_NO_TRADE, LABEL_LONG, LABEL_SHORT]))
-            aligned = [0.0, 0.0, 0.0]
-            for position, label in enumerate(classes):
-                index = int(label)
-                if 0 <= index < 3:
-                    aligned[index] = float(raw[position])
-            return aligned
-        raise RuntimeError(f"model {artifact.algorithm} has no predict_proba")
+        if not hasattr(model, "predict_proba"):
+            raise RuntimeError(f"model {artifact.algorithm} has no predict_proba")
+
+        if artifact.algorithm.startswith("softmax"):
+            return model.predict_proba([vector])[0]
+
+        payload = numpy.array([vector]) if HAVE_NUMPY else [vector]
+        raw = list(model.predict_proba(payload)[0])
+
+        # Backends order their output by `classes_`, which is not necessarily
+        # label order.  Realign into label-indexed slots.  The width comes from
+        # the model itself: a binary meta model emits two columns, a direction
+        # model three, and assuming three for both indexes off the end.
+        width = max(len(raw), 2)
+        classes = list(getattr(model, "classes_", range(len(raw))))
+        aligned = [0.0] * width
+        for position, label in enumerate(classes):
+            if position >= len(raw):
+                break
+            index = int(label)
+            if 0 <= index < width:
+                aligned[index] = float(raw[position])
+        return aligned
 
     # -- diagnostics ------------------------------------------------------
 

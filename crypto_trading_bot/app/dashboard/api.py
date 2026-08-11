@@ -107,6 +107,9 @@ class DashboardRoutes:
     def journal(self, limit: int = 20) -> dict[str, Any]:
         return {"entries": self._view("journal_view", limit, default=[]) or []}
 
+    def learning(self) -> dict[str, Any]:
+        return self._view("learning_view", default={"enabled": False})
+
     def decision(self, symbol: str) -> dict[str, Any]:
         return self._view("verdict_view", symbol, default={}) or {}
 
@@ -149,6 +152,7 @@ class DashboardRoutes:
             "intelligence": self.intelligence(),
             "verdicts": self.verdicts(6)["verdicts"],
             "flow": self.flow(6)["symbols"],
+            "learning": self.learning(),
         }
 
     # -- mutating ---------------------------------------------------------
@@ -283,6 +287,10 @@ def create_app(engine: Any, settings: Any) -> Any:
     @app.get("/api/journal")
     async def journal(limit: int = Query(20, ge=1, le=100)) -> Any:
         return routes.journal(limit)
+
+    @app.get("/api/learning")
+    async def learning() -> Any:
+        return routes.learning()
 
     @app.get("/api/decision/{symbol}")
     async def decision(symbol: str) -> Any:

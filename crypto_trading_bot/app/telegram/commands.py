@@ -46,6 +46,7 @@ COMMANDS: dict[str, str] = {
     "journal": "recent decisions with their reasons",
     "why": "/why SYMBOL - the full decision trace for one symbol",
     "memory": "what the market memory has learned so far",
+    "learning": "autonomous retraining: what was tried, what won, what was held",
     "help": "this list",
 }
 
@@ -673,6 +674,70 @@ class CommandRouter:
         ]
         return CommandResult(
             text="\n".join(lines), keyboard=keyboards.refresh_menu("memory")
+        )
+
+    async def _cmd_learning(self, args: str, user_id: int) -> CommandResult:
+        data = self._call_view("learning_view") or {"enabled": False}
+        if not data.get("enabled"):
+            return CommandResult(
+                text=(
+                    "🧠 <b>AUTONOMOUS LEARNING</b>\n\n"
+                    "Disabled. Set <code>AUTO_TRAIN_ENABLED=true</code> to let the "
+                    "bot retrain itself and grade each candidate against its own "
+                    "realised trades."
+                ),
+                keyboard=keyboards.back_to_menu(),
+            )
+
+        last_run = data.get("last_run_ts") or 0
+        lines = [
+            "🧠 <b>AUTONOMOUS LEARNING</b>",
+            "",
+            f"Cycles run: {data.get('cycles', 0)}",
+            f"Models promoted: {data.get('promotions', 0)}",
+            f"Every: {data.get('interval_hours', 0):g}h, "
+            f"after {data.get('min_new_trades', 0)} new resolved trades",
+            f"Promotion margin: +{data.get('promotion_margin', 0):.2f} lift "
+            f"on {data.get('min_live_samples', 0)}+ real trades",
+        ]
+        if last_run:
+            lines.append(f"Last run: {_duration(time.time() - last_run)} ago")
+
+        last = data.get("last_cycle")
+        if last:
+            verdict = "✅ PROMOTED" if last.get("promoted") else "⏸ HELD"
+            lines += [
+                "",
+                f"<b>Last cycle — {verdict}</b>",
+                f"  {last.get('rows', 0)} rows from {last.get('symbols', 0)} symbols",
+            ]
+            champion = last.get("champion_live_lift")
+            challenger = last.get("challenger_live_lift")
+            if champion is not None and challenger is not None:
+                lines.append(
+                    f"  on {last.get('live_samples', 0)} real trades: "
+                    f"champion {champion:.2f} vs challenger {challenger:.2f}"
+                )
+            if last.get("reason"):
+                lines.append(f"  <i>{html.escape(str(last['reason'])[:160])}</i>")
+
+        history = data.get("history") or []
+        if len(history) > 1:
+            lines += ["", "<b>Recent cycles</b>"]
+            for row in history[:6]:
+                icon = "✅" if row.get("promoted") else "⏸"
+                lift = row.get("challenger_live_lift") or row.get("challenger_lift") or 0
+                lines.append(
+                    f"{icon} {row.get('rows', 0)} rows, lift {float(lift):.2f}"
+                )
+
+        lines += [
+            "",
+            "<i>A promoted model only informs confidence. It cannot create a "
+            "trade, raise a size, or change a risk limit.</i>",
+        ]
+        return CommandResult(
+            text="\n".join(lines), keyboard=keyboards.refresh_menu("learning")
         )
 
     def _call_view(self, name: str, *args: Any, **kwargs: Any) -> Any:

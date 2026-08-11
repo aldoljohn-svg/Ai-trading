@@ -724,6 +724,66 @@ class JournalRepository:
             )
         ]
 
+    def resolved_entries(
+        self, since: int = 0, mode: str | None = None, limit: int = 5000
+    ) -> list[dict[str, Any]]:
+        """Entries that have an outcome recorded, joined to it.
+
+        This is the bot's own trading history in learnable form: the feature
+        vector exactly as it was at decision time, the side taken, and what
+        actually happened.  Nothing here is simulated -- it is the record of
+        decisions the bot made and lived with.
+
+        Outcomes are separate rows linked by ``parent_id`` because the journal
+        is append-only, so this joins the two rather than reading a mutated
+        entry.
+        """
+
+        sql = """
+            SELECT
+                e.decision_id AS decision_id,
+                e.ts          AS ts,
+                e.symbol      AS symbol,
+                e.side        AS side,
+                e.mode        AS mode,
+                e.confidence  AS confidence,
+                e.trade_quality AS trade_quality,
+                e.expected_r  AS expected_r,
+                e.trace       AS trace,
+                o.outcome     AS outcome,
+                o.ts          AS resolved_ts
+            FROM decision_journal e
+            JOIN decision_journal o ON o.parent_id = e.decision_id
+            WHERE e.kind = 'ENTRY' AND e.ts >= ?
+        """
+        params: list[Any] = [int(since)]
+        if mode:
+            sql += " AND e.mode = ?"
+            params.append(mode)
+        sql += " ORDER BY e.ts ASC LIMIT ?"
+        params.append(limit)
+
+        rows = []
+        for row in self.db.query(sql, params):
+            row["trace"] = loads(row.get("trace"), {})
+            row["outcome"] = loads(row.get("outcome"), {})
+            rows.append(row)
+        return rows
+
+    def resolved_count(self, since: int = 0, mode: str | None = None) -> int:
+        sql = """
+            SELECT COUNT(*) AS n
+            FROM decision_journal e
+            JOIN decision_journal o ON o.parent_id = e.decision_id
+            WHERE e.kind = 'ENTRY' AND e.ts >= ?
+        """
+        params: list[Any] = [int(since)]
+        if mode:
+            sql += " AND e.mode = ?"
+            params.append(mode)
+        row = self.db.query_one(sql, params)
+        return int(row["n"]) if row else 0
+
 
 def _decode_journal(row: dict[str, Any]) -> dict[str, Any]:
     for key, default in (
@@ -969,6 +1029,54 @@ class AuditRepository:
         return rows
 
 
+class TrainingRepository:
+    """Lineage of every retraining attempt, promoted or not.
+
+    The rejected cycles matter as much as the accepted ones: they are the
+    record of what the system tried and why it decided the incumbent was still
+    better.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def record(self, run: dict[str, Any]) -> int:
+        row = dict(run)
+        row["ts"] = int(row.get("ts", _now()))
+        row["metrics"] = dumps(row.get("metrics", {}))
+        return self.db.insert("training_runs", row)
+
+    def recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self.db.query(
+            "SELECT * FROM training_runs ORDER BY ts DESC, id DESC LIMIT ?", (limit,)
+        )
+        for row in rows:
+            row["metrics"] = loads(row.get("metrics"), {})
+            row["promoted"] = bool(row.get("promoted"))
+        return rows
+
+    def last_promotion(self) -> dict[str, Any] | None:
+        row = self.db.query_one(
+            "SELECT * FROM training_runs WHERE promoted=1 ORDER BY ts DESC LIMIT 1"
+        )
+        if row:
+            row["metrics"] = loads(row.get("metrics"), {})
+            row["promoted"] = True
+        return row
+
+    def statistics(self) -> dict[str, Any]:
+        row = self.db.query_one(
+            "SELECT COUNT(*) AS runs, SUM(promoted) AS promoted FROM training_runs"
+        )
+        runs = int(row["runs"]) if row else 0
+        promoted = int(row["promoted"] or 0) if row else 0
+        return {
+            "runs": runs,
+            "promoted": promoted,
+            "held": runs - promoted,
+        }
+
+
 class Repositories:
     """Convenience bundle passed around the application."""
 
@@ -994,6 +1102,7 @@ class Repositories:
         self.memory = MarketMemoryRepository(db)
         self.excursions = ExcursionRepository(db)
         self.audit = AuditRepository(db)
+        self.training = TrainingRepository(db)
 
 
 __all__ = [

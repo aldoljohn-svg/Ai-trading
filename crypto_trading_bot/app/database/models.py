@@ -519,6 +519,34 @@ AUDIT_LOG = TableSpec(
     indexes=(("ts",), ("action",), ("actor",)),
 )
 
+TRAINING_RUNS = TableSpec(
+    name="training_runs",
+    columns=(
+        _c("id", "PK"),
+        _c("ts", "INT", null=False),
+        _c("mode", "TEXT", null=False, default="'meta'"),
+        _c("trigger", "TEXT", null=False, default="'scheduled'"),
+        _c("symbols", "INT", null=False, default="0"),
+        _c("rows", "INT", null=False, default="0"),
+        _c("timeframe", "TEXT"),
+        # What the challenger scored on held-out history.
+        _c("challenger_version", "TEXT"),
+        _c("challenger_lift", "REAL"),
+        _c("challenger_brier", "REAL"),
+        # What both models scored on the bot's own realised trades.
+        _c("live_samples", "INT", null=False, default="0"),
+        _c("champion_live_lift", "REAL"),
+        _c("challenger_live_lift", "REAL"),
+        _c("champion_live_brier", "REAL"),
+        _c("challenger_live_brier", "REAL"),
+        _c("promoted", "INT", null=False, default="0"),
+        _c("reason", "TEXT"),
+        _c("metrics", "JSON"),
+    ),
+    indexes=(("ts",), ("promoted",)),
+)
+
+
 TABLES: tuple[TableSpec, ...] = (
     CANDLES,
     FEATURES,
@@ -541,6 +569,7 @@ TABLES: tuple[TableSpec, ...] = (
     MARKET_MEMORY,
     TRADE_EXCURSIONS,
     AUDIT_LOG,
+    TRAINING_RUNS,
 )
 
 TABLES_BY_NAME: dict[str, TableSpec] = {t.name: t for t in TABLES}

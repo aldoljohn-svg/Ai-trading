@@ -357,6 +357,7 @@ component health.
 | `/api/verdicts` | recent intelligence verdicts, newest first |
 | `/api/flow` | order flow, microstructure, liquidity, derivatives |
 | `/api/journal` | recent decisions including the refusals |
+| `/api/learning` | retraining lineage: cycles, promotions, comparisons |
 | `/api/decision/{symbol}` | the full decision trace for one symbol |
 | `/api/config` | configuration, **secrets masked** |
 | `/api/equity` | equity curve |
@@ -403,6 +404,7 @@ and set `DASHBOARD_TOKEN` so the control endpoints require a token.
 | `/journal` | recent decisions — including the refusals — with their reasons |
 | `/why SYMBOL` | the full decision trace for one symbol |
 | `/memory` | what the market memory has learned so far |
+| `/learning` | autonomous retraining: what was tried, what won, what was held |
 | `/help` | this list |
 
 The main menu mirrors these as buttons:
@@ -555,6 +557,48 @@ cannot beat its baseline, because an uninformative model that ships is worse
 than no model — the signal engine would weight its noise. The bot keeps running
 on rules alone, which is the safe outcome. If a model keeps failing, that is a
 real finding about the label, not a bug to work around.
+
+### Autonomous retraining (`AUTO_TRAIN_ENABLED`)
+
+A model trained once and never revisited decays, because the market it learned
+stops being the market it trades. With this on, the bot retrains on a schedule
+and — the part that matters — **grades every candidate against its own realised
+trades**.
+
+The journal already stores the feature vector exactly as it was at decision
+time, the side taken and what happened, so the bot's trading history *is* a
+labelled dataset, drawn from the distribution it actually faces rather than a
+backtest's idea of it. Each cycle:
+
+1. Collect the decisions that have since resolved.
+2. Build a fresh training set from recent market data and fit a challenger.
+3. Score the **champion and the challenger on the same live outcomes**. Not
+   "does the new model look good on history" but "would it have ranked our real
+   trades better than the model that took them".
+4. Promote only if the challenger wins on evidence.
+
+**Promotion is deliberately hard.** Retraining on recent data and deploying
+whatever comes out is how a system chases noise into a drawdown. Every barrier
+has to clear: the challenger must pass the same acceptance test as a manual run,
+survive the overfitting detector, and beat the champion on real trades by
+`AUTO_TRAIN_PROMOTION_MARGIN` — or, when live evidence is thin, beat it on
+held-out history by a much wider margin. **A tie leaves the champion in place**:
+the incumbent has already been tested with real money, so the burden of proof
+sits with the challenger.
+
+Every cycle is recorded, promoted or not. `/learning` shows the lineage — the
+refusals matter as much as the promotions, because they are the record of what
+the system tried and why it decided the incumbent was still better.
+
+**What this can and cannot change.** It swaps which model informs *confidence*.
+That is all. The model's influence stays capped at `ML_WEIGHT` and it can never
+create a trade, raise a position size, or touch a risk limit — those sit above
+it in the hierarchy and are not writable from here. Automating the retraining
+does not widen what the model is allowed to do.
+
+Leave it off until paper mode has produced a real trading history for it to
+learn from. With no resolved trades there is nothing to grade against, and the
+first challenger is promoted on its held-out score alone.
 
 ### Choosing what to train on
 
@@ -1169,7 +1213,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       540 tests
+├── tests/                       573 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

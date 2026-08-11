@@ -319,6 +319,27 @@ class Settings:
     ml_min_training_rows: int = 400
     ml_weight: float = 0.35
 
+    # --- autonomous retraining ------------------------------------------
+    #: Retrain on a schedule and grade each candidate against the bot's own
+    #: realised trades.  This only ever swaps which model informs *confidence*;
+    #: the model's influence stays capped at ml_weight and it can never create a
+    #: trade, raise a size, or touch a risk limit.
+    auto_train_enabled: bool = False
+    auto_train_interval_hours: float = 24.0
+    #: Resolved trades required since the last run before retraining again.
+    #: Retraining with nothing new to learn from risks swapping a tested model
+    #: for an untested one on noise.
+    auto_train_min_new_trades: int = 20
+    #: Live outcomes a challenger must be judged on before that verdict is
+    #: trusted on its own.
+    auto_train_min_live_samples: int = 40
+    #: How far a challenger must beat the champion on real trades to take over.
+    auto_train_promotion_margin: float = 0.10
+    auto_train_symbols: int = 30
+    auto_train_bars: int = 6000
+    auto_train_timeframe: str = "15m"
+    auto_train_horizon: int = 24
+
     # --- paper -----------------------------------------------------------
     paper_starting_equity: float = 1000.0
 
@@ -588,6 +609,39 @@ def validate(settings: Settings) -> Settings:
         errors.append("min_rr must be >= 1.0; sub-1R targets are rejected")
     if settings.min_rr > 20:
         errors.append("min_rr > 20 is unrealistic and would block all trades")
+    if settings.auto_train_enabled:
+        if settings.auto_train_interval_hours < 1:
+            errors.append(
+                "auto_train_interval_hours must be >= 1; retraining more often "
+                "than hourly cannot accumulate new evidence and only chases noise"
+            )
+        if settings.auto_train_promotion_margin < 0:
+            errors.append(
+                "auto_train_promotion_margin must be >= 0; a negative margin "
+                "would promote a challenger that lost to the champion"
+            )
+        if settings.auto_train_min_live_samples < 10:
+            errors.append(
+                "auto_train_min_live_samples must be >= 10; fewer real trades "
+                "than that cannot tell a better model from luck"
+            )
+        if settings.auto_train_symbols < 1:
+            errors.append("auto_train_symbols must be >= 1")
+        if settings.auto_train_bars < 1000:
+            errors.append("auto_train_bars must be >= 1000 to build a usable dataset")
+        if settings.auto_train_horizon < 1:
+            errors.append("auto_train_horizon must be >= 1")
+        if settings.auto_train_timeframe not in {t.value for t in Timeframe}:
+            errors.append(
+                f"auto_train_timeframe={settings.auto_train_timeframe} is not a "
+                "known timeframe"
+            )
+        if not settings.ml_enabled:
+            errors.append(
+                "auto_train_enabled requires ml_enabled; there is no point "
+                "training a model the signal engine will not consult"
+            )
+
     if settings.deep_analysis_count < 1:
         errors.append("deep_analysis_count must be >= 1")
     if settings.deep_analysis_count > settings.max_symbols_to_scan:
@@ -640,10 +694,6 @@ def validate(settings: Settings) -> Settings:
         errors.append("max_symbols_to_scan must be >= 1")
     if settings.max_symbols_to_scan > 1000:
         errors.append("max_symbols_to_scan > 1000 will breach exchange rate limits")
-    if settings.deep_analysis_count < 1:
-        errors.append("deep_analysis_count must be >= 1")
-    if settings.deep_analysis_count > settings.max_symbols_to_scan:
-        errors.append("deep_analysis_count must not exceed max_symbols_to_scan")
     if settings.scanner_interval_seconds < 10:
         errors.append(
             "scanner_interval_seconds < 10 would breach MEXC rate limits"

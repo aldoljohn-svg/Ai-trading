@@ -77,6 +77,7 @@ from app.scanner.ranking import Opportunity, rank_opportunities
 from app.scanner.scanner import Scanner, SymbolAnalysis
 from app.scanner.universe import UniverseBuilder
 from app.intelligence import IntelligenceCoordinator, IntelligenceVerdict
+from app.ml.autotrain import AutoTrainer
 from app.signals.signal_engine import SignalEngine
 from app.signals.trade_proposal import Decision, TradeProposal
 
@@ -137,6 +138,7 @@ class TradingEngine:
         self.position_manager: PositionManager | None = None
         self.reconciler: Reconciler | None = None
         self.predictor: Predictor | None = None
+        self.auto_trainer: AutoTrainer | None = None
         self.intelligence: IntelligenceCoordinator | None = None
         self.health = HealthMonitor()
         self.paper: PaperEngine | None = None
@@ -217,6 +219,22 @@ class TradingEngine:
         )
         self.predictor = Predictor(registry, model_name=settings.ml_model_name)
         self.signal_engine = SignalEngine(settings, predictor=self.predictor)
+
+        if settings.auto_train_enabled:
+            self.auto_trainer = AutoTrainer(
+                settings,
+                registry=registry,
+                repositories=self.repositories,
+                promotion_margin=settings.auto_train_promotion_margin,
+                min_live_samples=settings.auto_train_min_live_samples,
+            )
+            log.info(
+                "autonomous retraining enabled: every %.0fh, needs %d new "
+                "resolved trades, promotes on +%.2f live lift",
+                settings.auto_train_interval_hours,
+                settings.auto_train_min_new_trades,
+                settings.auto_train_promotion_margin,
+            )
 
         if settings.intelligence_enabled:
             self.intelligence = IntelligenceCoordinator(
@@ -461,6 +479,10 @@ class TradingEngine:
             asyncio.create_task(self._health_loop(), name="health"),
             asyncio.create_task(self._reconcile_loop(), name="reconcile"),
         ]
+        if self.auto_trainer is not None:
+            self._tasks.append(
+                asyncio.create_task(self._learning_loop(), name="learning")
+            )
         self.repositories.events.system_event(
             "engine", f"started in {settings.trading_mode.value} mode"
         )
@@ -597,6 +619,41 @@ class TradingEngine:
             except Exception as exc:  # noqa: BLE001
                 log.exception("health loop error: %s", exc)
             await self._sleep(interval)
+
+    async def _learning_loop(self) -> None:
+        """Retrain periodically, promoting only what beats the incumbent.
+
+        Runs on its own slow cadence and checks a cheap ``due()`` predicate
+        rather than sleeping for the whole interval, so a restart does not reset
+        the clock and the loop stays responsive to shutdown.
+        """
+
+        # Give the bot time to fetch data and settle before the first check.
+        await self._sleep(120)
+        while not self._stopping.is_set():
+            try:
+                if self.auto_trainer is not None and self.auto_trainer.due():
+                    log.info("auto-train cycle starting")
+                    cycle = await self.auto_trainer.run_cycle(self.exchange)
+                    if cycle.promoted:
+                        if self.predictor is not None:
+                            self.predictor.reload()
+                        if self.intelligence is not None:
+                            self.intelligence.predictor = self.predictor
+                        await self.notifier.alert(
+                            "🧠 <b>MODEL UPDATED</b>\n\n"
+                            f"<pre>{cycle.summary()}</pre>\n\n"
+                            "<i>The new model only informs confidence. Risk "
+                            "limits are unchanged.</i>"
+                        )
+                    else:
+                        log.info("auto-train: %s", cycle.reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - learning never breaks trading
+                self.stats.errors += 1
+                log.exception("learning loop error: %s", exc)
+            await self._sleep(600)
 
     async def _reconcile_loop(self) -> None:
         interval = self.settings.reconcile_interval_seconds
@@ -1168,6 +1225,13 @@ class TradingEngine:
         }
 
     # -- intelligence views ------------------------------------------------
+
+    def learning_view(self) -> dict[str, Any]:
+        """Retraining lineage: what was tried, what won, what was held."""
+
+        if self.auto_trainer is None:
+            return {"enabled": False}
+        return self.auto_trainer.describe()
 
     def intelligence_view(self) -> dict[str, Any]:
         """Model weights, journal and memory statistics."""
