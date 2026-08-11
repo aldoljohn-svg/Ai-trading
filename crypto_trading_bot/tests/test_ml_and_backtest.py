@@ -373,7 +373,25 @@ class TestBacktest:
                                 slippage_pct=0.003, spread_pct=0.002)
         free_result = BacktestEngine(settings, data, contracts, base).run()
         cost_result = BacktestEngine(settings, data, contracts, costly).run()
-        if free_result.metrics.trades and cost_result.metrics.trades:
+
+        if not (free_result.metrics.trades and cost_result.metrics.trades):
+            pytest.skip("no trades taken in this window")
+
+        # Fees are the direct, causal effect and can be compared per trade.
+        free_fee = free_result.metrics.total_fees / free_result.metrics.trades
+        cost_fee = cost_result.metrics.total_fees / cost_result.metrics.trades
+        assert free_fee == pytest.approx(0.0, abs=1e-9)
+        assert cost_fee > free_fee
+
+        # Net return is NOT comparable across the two runs in general: costs
+        # move the effective entry, which moves the stop distance, which changes
+        # which setups clear the reward:risk gate.  The two runs therefore take
+        # different trades, and on a handful of them the selection difference
+        # swamps the cost difference.  Only compare when the same trades were
+        # taken.
+        free_entries = [t["opened_at"] for t in free_result.trades]
+        cost_entries = [t["opened_at"] for t in cost_result.trades]
+        if free_entries == cost_entries:
             assert cost_result.metrics.total_return <= free_result.metrics.total_return
 
     def test_refuses_without_enough_history(self, settings, exchange):

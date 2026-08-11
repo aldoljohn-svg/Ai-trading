@@ -98,43 +98,106 @@ class Application:
             self.engine.health.register("Telegram", self.telegram.health)
 
     async def _start_dashboard(self) -> None:
+        """Start the dashboard, or carry on without it.
+
+        The dashboard is an accessory.  The engine manages open positions, and a
+        bot that exits because a web UI could not bind a port is a bot that
+        leaves those positions unmanaged -- which is far worse than losing the
+        UI.  Every failure here is logged and swallowed.
+
+        Uvicorn calls ``sys.exit(1)`` when it cannot bind, which inside a task
+        raises ``SystemExit``; that propagates out of the event loop and takes
+        the process down, so it has to be caught explicitly rather than relying
+        on a plain ``except Exception``.
+        """
+
         settings = self.settings
         if not settings.dashboard_enabled:
             log.info("dashboard disabled by configuration")
             return
 
-        if HAVE_FASTAPI and HAVE_UVICORN:
-            import uvicorn  # type: ignore
+        try:
+            if HAVE_FASTAPI and HAVE_UVICORN:
+                await self._start_uvicorn_dashboard()
+            else:
+                from app.dashboard.server import serve_dashboard
 
-            from app.dashboard.api import create_app
-
-            app = create_app(self.engine, settings)
-            config = uvicorn.Config(
-                app,
-                host=settings.dashboard_host,
-                port=settings.dashboard_port,
-                log_level=settings.log_level.value.lower(),
-                access_log=False,
-                lifespan="on",
+                self.dashboard_server = serve_dashboard(
+                    self.engine, settings, loop=asyncio.get_running_loop()
+                )
+                log.info("dashboard on %s", self.dashboard_server.url)
+        except OSError as exc:
+            self._dashboard_unavailable(
+                f"could not bind {settings.dashboard_host}:{settings.dashboard_port}"
+                f" ({exc}). Another instance is probably already running -"
+                " check with: ss -ltnp | grep :%d" % settings.dashboard_port
             )
-            server = uvicorn.Server(config)
-            # Uvicorn installs its own signal handlers; we own shutdown.
-            server.install_signal_handlers = lambda: None  # type: ignore[assignment]
-            self.dashboard_server = server
-            self.dashboard_task = asyncio.create_task(server.serve(), name="dashboard")
-            log.info(
-                "dashboard on http://%s:%d",
-                "localhost" if settings.dashboard_host == "0.0.0.0" else settings.dashboard_host,
-                settings.dashboard_port,
-            )
-            return
+        except Exception as exc:  # noqa: BLE001 - the UI is never worth a crash
+            self._dashboard_unavailable(f"failed to start: {exc}")
 
-        from app.dashboard.server import serve_dashboard
+    async def _start_uvicorn_dashboard(self) -> None:
+        import uvicorn  # type: ignore
 
-        self.dashboard_server = serve_dashboard(
-            self.engine, settings, loop=asyncio.get_running_loop()
+        from app.dashboard.api import create_app
+
+        settings = self.settings
+        app = create_app(self.engine, settings)
+        config = uvicorn.Config(
+            app,
+            host=settings.dashboard_host,
+            port=settings.dashboard_port,
+            log_level=settings.log_level.value.lower(),
+            access_log=False,
+            lifespan="on",
         )
-        log.info("dashboard on %s", self.dashboard_server.url)
+        server = uvicorn.Server(config)
+        # Uvicorn installs its own signal handlers; we own shutdown.
+        server.install_signal_handlers = lambda: None  # type: ignore[assignment]
+        self.dashboard_server = server
+
+        async def supervise() -> None:
+            try:
+                await server.serve()
+            except asyncio.CancelledError:
+                raise
+            except SystemExit as exc:
+                # uvicorn's way of reporting a failed bind.
+                self._dashboard_unavailable(
+                    f"could not bind {settings.dashboard_host}:"
+                    f"{settings.dashboard_port} (exit {exc.code}). Another "
+                    "instance is probably already running."
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._dashboard_unavailable(f"stopped unexpectedly: {exc}")
+
+        self.dashboard_task = asyncio.create_task(supervise(), name="dashboard")
+
+        # Give the bind a moment to fail so the "dashboard on ..." line is not
+        # printed for a server that is already dead.
+        await asyncio.sleep(0.5)
+        if self.dashboard_server is None:
+            return
+        log.info(
+            "dashboard on http://%s:%d",
+            "localhost" if settings.dashboard_host == "0.0.0.0" else settings.dashboard_host,
+            settings.dashboard_port,
+        )
+
+    def _dashboard_unavailable(self, detail: str) -> None:
+        """Record that the dashboard is down without stopping the engine."""
+
+        self.dashboard_server = None
+        log.error(
+            "DASHBOARD UNAVAILABLE - %s\n"
+            "    The trading engine is unaffected and keeps running. "
+            "Telegram control still works.",
+            detail,
+        )
+        if self.engine is not None:
+            self.engine.health.register(
+                "Dashboard",
+                lambda: {"state": "WARNING", "detail": detail[:180]},
+            )
 
     # -- lifecycle --------------------------------------------------------
 
@@ -165,6 +228,12 @@ class Application:
         elif self.dashboard_server is not None:
             with contextlib.suppress(Exception):
                 self.dashboard_server.stop()
+        elif self.dashboard_task is not None and not self.dashboard_task.done():
+            # The dashboard failed to start; its supervisor may still be
+            # unwinding.  Do not leave the task dangling.
+            self.dashboard_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self.dashboard_task
 
         log.info("shutdown complete")
 
