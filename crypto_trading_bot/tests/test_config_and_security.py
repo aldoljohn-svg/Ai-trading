@@ -37,7 +37,9 @@ class TestDefaults:
         assert s.max_open_positions == 3
         assert s.max_leverage == 3.0
         assert s.min_confidence == 0.70
-        assert s.min_rr == 2.0
+        # 1.7 needs a 37% win rate to break even, before costs.  The regime
+        # multiplier still raises it where conditions warrant (3.4 in a range).
+        assert s.min_rr == 1.7
         assert s.max_symbols_to_scan == 100
         assert s.scanner_interval_seconds == 60
 

@@ -420,6 +420,17 @@ Status: 🟢 RUNNING
 [🧭 REGIME] [📓 JOURNAL]
 ```
 
+**One panel at a time.** Pressing REFRESH or MENU replaces the panel that is
+already on screen rather than posting another copy underneath it, so the chat
+stays a control surface instead of becoming a scrollback of dead panels. The
+new panel is sent first and the old one deleted second, so a failed send leaves
+you with the previous panel rather than none.
+
+Trade alerts and reports are **never** replaced — those are the record, and
+they survive every refresh. Set `TELEGRAM_SINGLE_PANEL=false` to go back to
+stacking. Telegram refuses to delete anything older than 48 hours; when that
+happens the old panel simply stays and the bot carries on.
+
 Every trade sends a full report on entry (equity, risk %, risk amount, size,
 notional, leverage, entry, stop, TP1/2/3, R:R, confidence, regime, HTF
 alignment, and the reasons), plus updates on TP hits, stop moves, break-even,
@@ -691,7 +702,9 @@ decide action.
 
 ### Gates — all must pass
 
-confidence ≥ `MIN_CONFIDENCE` · R:R ≥ `MIN_RR` (scaled by regime) · liquidity ok
+confidence ≥ `MIN_CONFIDENCE` · R:R ≥ `MIN_RR` (default 1.7, scaled by regime —
+2.0× in a range means 3.4 there; 1.7R needs a 37% win rate to break even before
+costs, against 33% at 2.0R) · liquidity ok
 · spread ok · order-book depth ok · volatility inside band · market data healthy
 · no price anomaly · regime permits entries · no fundamental danger · no circuit
 breaker · risk budget available · portfolio and correlation limits respected ·
@@ -1081,7 +1094,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       483 tests
+├── tests/                       499 tests
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

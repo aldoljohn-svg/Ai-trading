@@ -85,9 +85,29 @@ class TelegramClient:
         silent: bool = False,
         parse_mode: str = "HTML",
     ) -> dict[str, Any]:
+        """Send a message, splitting it if Telegram's 4096 limit demands it.
+
+        Returns the final chunk's result.  Callers that need every message id --
+        the panel replacement in :class:`TelegramBot` does -- should use
+        :meth:`send_message_ids` instead.
+        """
+
+        results = await self.send_message_chunks(
+            chat_id, text, keyboard=keyboard, silent=silent, parse_mode=parse_mode
+        )
+        return results[-1] if results else {}
+
+    async def send_message_chunks(
+        self,
+        chat_id: str | int,
+        text: str,
+        keyboard: dict[str, Any] | None = None,
+        silent: bool = False,
+        parse_mode: str = "HTML",
+    ) -> list[dict[str, Any]]:
         # Telegram rejects messages over 4096 characters.
         chunks = _split_message(text)
-        result: dict[str, Any] = {}
+        results: list[dict[str, Any]] = []
         for index, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": chat_id,
@@ -98,8 +118,26 @@ class TelegramClient:
             }
             if keyboard and index == len(chunks) - 1:
                 payload["reply_markup"] = json.dumps(keyboard)
-            result = await self._call("sendMessage", payload)
-        return result
+            results.append(await self._call("sendMessage", payload) or {})
+        return results
+
+    async def delete_message(self, chat_id: str | int, message_id: int) -> bool:
+        """Delete one message.
+
+        Telegram refuses to delete messages older than 48 hours and returns an
+        error for one already gone.  Neither is worth surfacing -- the caller is
+        tidying up, not performing a critical operation -- so both come back as
+        ``False``.
+        """
+
+        try:
+            await self._call(
+                "deleteMessage", {"chat_id": chat_id, "message_id": message_id}
+            )
+            return True
+        except TelegramError as exc:
+            log.debug("could not delete message %s: %s", message_id, exc)
+            return False
 
     async def edit_message(
         self,
@@ -165,6 +203,13 @@ class TelegramBot:
         self._running = False
         self.updates_handled = 0
         self.unauthorised_attempts = 0
+        #: chat id -> message ids of the panel currently on screen there.
+        #: Pressing REFRESH or MENU replaces that panel instead of stacking a
+        #: new copy underneath it, so the chat stays a control surface rather
+        #: than an ever-growing log.  Alerts and trade reports are sent by the
+        #: notifier and are never tracked here -- those are a record and must
+        #: not disappear when a panel refreshes.
+        self._panels: dict[str, list[int]] = {}
 
     @property
     def enabled(self) -> bool:
@@ -270,10 +315,43 @@ class TelegramBot:
         if not result.handled or not result.text:
             return
 
+        await self._show_panel(chat_id, result)
+
+    async def _show_panel(self, chat_id: Any, result: CommandResult) -> None:
+        """Put a panel on screen, replacing whatever panel was there before.
+
+        Send first, delete second.  The reverse order means a failed send
+        leaves the chat with no panel at all; this way the worst case is the
+        old behaviour -- two panels -- rather than none.
+        """
+
+        key = str(chat_id)
+        previous = self._panels.pop(key, [])
+
+        sent: list[dict[str, Any]] = []
         with contextlib.suppress(TelegramError):
-            await self.client.send_message(
+            sent = await self.client.send_message_chunks(
                 chat_id, result.text, keyboard=result.keyboard
             )
+
+        if not sent:
+            # The send failed, so the old panel is still the only one there.
+            if previous:
+                self._panels[key] = previous
+            return
+
+        if self.settings.telegram_single_panel:
+            for message_id in previous:
+                await self.client.delete_message(chat_id, message_id)
+
+        ids = [int(m["message_id"]) for m in sent if isinstance(m, dict) and m.get("message_id")]
+        if ids:
+            self._panels[key] = ids
+
+    def forget_panel(self, chat_id: Any) -> None:
+        """Stop tracking a chat's panel, e.g. after the operator deleted it."""
+
+        self._panels.pop(str(chat_id), None)
 
     # -- diagnostics ------------------------------------------------------
 

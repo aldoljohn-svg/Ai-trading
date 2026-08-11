@@ -254,7 +254,12 @@ class Settings:
 
     # --- signal gating ---------------------------------------------------
     min_confidence: float = 0.70
-    min_rr: float = 2.0
+    #: Minimum reward:risk before regime scaling.  1.7 needs a 37% win rate to
+    #: break even before costs, against 33% at 2.0 -- a real but modest
+    #: loosening that admits continuation setups whose structural target sits
+    #: just short of 2R.  The regime multiplier still raises it in conditions
+    #: that deserve more room (2.0x in a range, so 3.4 there).
+    min_rr: float = 1.7
     min_atr_pct: float = 0.0015
     max_atr_pct: float = 0.15
     max_spread_pct: float = 0.0008
@@ -329,6 +334,9 @@ class Settings:
     position_manage_interval_seconds: float = 5.0
     health_interval_seconds: float = 30.0
     telegram_poll_timeout: int = 25
+    #: Replace the previous control panel instead of sending a new one below it.
+    #: Alerts and trade reports are never replaced -- those are the record.
+    telegram_single_panel: bool = True
 
     # --- intelligence layer ----------------------------------------------
     #: Master switch for the advanced quant / institutional layer.  When off the
