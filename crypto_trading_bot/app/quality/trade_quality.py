@@ -157,7 +157,13 @@ def compute_trade_quality(
         # Saturating: 2x the minimum is good, 4x is not twice as good.
         components["reward_risk"] = 100.0 * min(1.0, 0.5 + 0.5 * (1 - 1 / max(ratio, 0.1)))
     else:
-        components["reward_risk"] = 0.0
+        # No reward:risk means there is no proposal to measure -- the signal
+        # engine declined before geometry was computed.  Scoring that as zero
+        # treated "not measured" as "measured and terrible", cost 14 points of
+        # quality, and made the breakdown blame the wrong thing.  Unknown is
+        # neutral.
+        components["reward_risk"] = 50.0
+        notes.append("no reward:risk to score - no entry was proposed")
 
     # --- portfolio headroom ----------------------------------------------------
     components["portfolio_headroom"] = 100.0 * max(0.0, min(portfolio_headroom, 1.0))

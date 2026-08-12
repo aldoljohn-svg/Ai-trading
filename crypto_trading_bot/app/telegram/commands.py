@@ -621,6 +621,43 @@ class CommandRouter:
             f"Size influence: {_pct(verdict.get('size_multiplier'))}",
         ]
 
+        # A bare score says a trade was not good enough without saying which
+        # part was weak, which is the only thing worth knowing when a setup with
+        # good expected value keeps missing the quality gate.
+        components = quality.get("components") or {}
+        if components:
+            weights = {
+                "signal": 0.34,
+                "regime_fit": 0.16,
+                "order_flow": 0.16,
+                "reward_risk": 0.14,
+                "liquidity": 0.10,
+                "portfolio_headroom": 0.10,
+            }
+            lines += ["", "<b>Quality breakdown</b>"]
+            # Sort by how much each component costs against a perfect score, so
+            # the biggest drag is always the first line.
+            ranked = sorted(
+                components.items(),
+                key=lambda kv: (100.0 - float(kv[1])) * weights.get(kv[0], 0.1),
+                reverse=True,
+            )
+            for name, value in ranked:
+                weight = weights.get(name, 0.1)
+                drag = (100.0 - float(value)) * weight
+                bar = "█" * int(float(value) / 10) or "▁"
+                lines.append(
+                    f"  {name.replace('_', ' '):<18} {float(value):>5.0f} "
+                    f"<code>{bar:<10}</code> -{drag:.0f}"
+                )
+
+        penalties = quality.get("penalties") or {}
+        applied = {k: v for k, v in penalties.items() if float(v or 0) > 0.05}
+        if applied:
+            lines.append("  <i>risk penalties: " + ", ".join(
+                f"{k.replace('_', ' ')} {float(v):.2f}" for k, v in applied.items()
+            ) + "</i>")
+
         for label, key in (
             ("Data risk", "data_risk"),
             ("Model risk", "model_risk"),

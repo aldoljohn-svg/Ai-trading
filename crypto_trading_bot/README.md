@@ -400,7 +400,7 @@ and set `DASHBOARD_TOKEN` so the control endpoints require a token.
 | `/liquidity` | liquidity pools and which side price is being pulled toward |
 | `/regime` | current regime per scanned symbol |
 | `/journal` | recent decisions — including the refusals — with their reasons |
-| `/why SYMBOL` | the full decision trace for one symbol |
+| `/why SYMBOL` | the full decision trace, with the quality breakdown showing which component cost the most |
 | `/memory` | what the market memory has learned so far |
 | `/learning` | autonomous retraining: what was tried, what won, what was held |
 | `/help` | this list |
@@ -1225,7 +1225,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       621 tests
+├── tests/                       624 tests
 ├── deploy/                      systemd unit
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/

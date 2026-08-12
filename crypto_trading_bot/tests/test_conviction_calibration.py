@@ -200,3 +200,37 @@ class TestNewsWiring:
         assert not assessment.feed_loaded
         assert assessment.sentiment is Sentiment.UNKNOWN
         assert not assessment.blocks_entries
+
+
+class TestUnknownIsNotZero:
+    """"Not measured" must not be scored as "measured and terrible"."""
+
+    def test_a_missing_reward_risk_is_neutral(self):
+        from app.quality.trade_quality import compute_trade_quality
+
+        unknown = compute_trade_quality(
+            ensemble=_Ensemble(0.8, 0.7), regime=Regime.TREND_UP, rr=0.0, min_rr=1.7
+        )
+        assert unknown.components["reward_risk"] == 50.0
+        assert any("no reward:risk" in note for note in unknown.notes)
+
+    def test_a_genuinely_poor_reward_risk_still_scores_low(self):
+        from app.quality.trade_quality import compute_trade_quality
+
+        poor = compute_trade_quality(
+            ensemble=_Ensemble(0.8, 0.7), regime=Regime.TREND_UP, rr=0.5, min_rr=1.7
+        )
+        good = compute_trade_quality(
+            ensemble=_Ensemble(0.8, 0.7), regime=Regime.TREND_UP, rr=3.5, min_rr=1.7
+        )
+        assert poor.components["reward_risk"] < 50.0 < good.components["reward_risk"]
+
+    def test_an_unproposed_trade_is_still_rejected_on_its_merits(self):
+        """Neutralising the artefact must not let a non-trade look acceptable."""
+
+        from app.quality.trade_quality import compute_trade_quality
+
+        weak = compute_trade_quality(
+            ensemble=_Ensemble(0.55, 0.4), regime=Regime.TRANSITION, rr=0.0, min_rr=1.7
+        )
+        assert not weak.acceptable
