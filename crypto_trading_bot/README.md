@@ -303,34 +303,32 @@ python -m app.main
 
 ### Run as a systemd service
 
+A ready unit file ships in `deploy/`:
+
 ```bash
-sudo tee /etc/systemd/system/trading-bot.service > /dev/null <<'EOF'
-[Unit]
-Description=Crypto Trading Bot
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=YOUR_USER
-WorkingDirectory=/home/YOUR_USER/Ai-trading/crypto_trading_bot
-Environment=TZ=UTC
-ExecStart=/home/YOUR_USER/Ai-trading/crypto_trading_bot/.venv/bin/python -m app.main
-Restart=on-failure
-RestartSec=15
-TimeoutStopSec=60
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
+sudo cp deploy/trading-bot.service /etc/systemd/system/
+sudo nano /etc/systemd/system/trading-bot.service    # fix User= and the paths
 sudo systemctl daemon-reload
 sudo systemctl enable --now trading-bot
-sudo systemctl status trading-bot
 journalctl -u trading-bot -f
 ```
+
+> **Do not add `EnvironmentFile=` to the unit.** The bot reads `.env` itself,
+> with a parser that understands quoting and inline comments. systemd's
+> `EnvironmentFile=` does not — it passes everything after the `=` straight
+> through, so a line like
+>
+> ```ini
+> MAX_LEVERAGE=3    # conservative
+> ```
+>
+> arrives as the string `"3    # conservative"`, the bot refuses to start with
+> `expected a number`, and systemd restarts it into the same error forever. The
+> shipped unit leaves configuration loading to the application, which keeps one
+> parser in charge.
+>
+> `.env.example` keeps every comment on its own line so it works under either
+> parser, and a test enforces that.
 
 ---
 
@@ -1227,7 +1225,8 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       585 tests
+├── tests/                       597 tests
+├── deploy/                      systemd unit
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/
 ├── .env.example   config.yaml   requirements.txt

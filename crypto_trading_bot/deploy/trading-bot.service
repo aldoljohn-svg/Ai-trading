@@ -1,0 +1,61 @@
+# systemd unit for running the bot without Docker.
+#
+#   sudo cp deploy/trading-bot.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/trading-bot.service    # fix the paths
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now trading-bot
+#   journalctl -u trading-bot -f
+#
+# Note there is deliberately NO EnvironmentFile= line.  The bot reads .env
+# itself, with a parser that understands quoting and inline comments.  systemd's
+# EnvironmentFile= does not: it passes everything after the "=" through,
+# comment included, so a line like
+#
+#     MAX_LEVERAGE=3    # conservative
+#
+# arrives as the string "3    # conservative" and the bot refuses to start.
+# Letting the application load its own configuration avoids the whole class of
+# problem and keeps one parser in charge.
+
+[Unit]
+Description=Crypto Trading Bot (MEXC Futures)
+Documentation=https://github.com/aldoljohn-svg/Ai-trading
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Adjust these three to match where you cloned the repository.
+User=root
+WorkingDirectory=/root/Ai-trading/crypto_trading_bot
+ExecStart=/root/Ai-trading/crypto_trading_bot/.venv/bin/python -m app.main
+
+# The daily-loss breaker rolls on the UTC day and every stored timestamp is
+# epoch UTC, so run the process in UTC regardless of the host's timezone.
+Environment=TZ=UTC
+Environment=PYTHONUNBUFFERED=1
+
+Restart=always
+RestartSec=15
+
+# Give the engine time to persist positions and close the exchange connection.
+# Stopping the bot does not liquidate anything; open positions keep their stops.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# A configuration error is not worth an infinite restart loop - it will never
+# fix itself, and the journal fills with the same traceback. Five failures
+# inside two minutes stops the unit so the error stays readable.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+# Modest hardening. The bot needs to write data/, logs/ and models/ inside its
+# working directory and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+
+[Install]
+WantedBy=multi-user.target
