@@ -12,6 +12,10 @@ No lookahead
 * When one bar spans both the stop and a target, the stop is assumed to have
   been hit first.  From OHLC alone the order is unknowable, and the optimistic
   assumption is what makes backtests stop matching live results.
+* A position filled at bar ``i+1``'s open is managed against bar ``i+1``'s own
+  high and low, not from ``i+2`` onward.  It was exposed to that bar's range,
+  so skipping it let every trade that would have been stopped out on its entry
+  bar survive to be judged on a later one.
 * Fees, spread crossing, slippage and funding are all charged.
 
 Same code as live
@@ -474,12 +478,27 @@ class BacktestEngine:
 
             # --- 2. execute fills scheduled from previous bars ------------
             still_pending: list[tuple[int, str, Any, Any]] = []
+            opened_now: list[str] = []
             for fill_index, symbol, decision, spec in pending:
                 if fill_index > index:
                     still_pending.append((fill_index, symbol, decision, spec))
                     continue
+                before = symbol in self.positions
                 self._open(decision, spec, series[symbol][index], bar_ts)
+                if not before and symbol in self.positions:
+                    opened_now.append(symbol)
             pending = still_pending
+
+            # A position filled at this bar's OPEN was exposed to this bar's
+            # whole range, so it has to be managed against it.  Step 1 ran
+            # before the fill existed, so without this the entry bar's high and
+            # low were never checked and any trade stopped out on the bar it
+            # opened survived to be judged on a later one -- a systematic
+            # optimistic bias, and precisely the trade a fast market takes.
+            for symbol in opened_now:
+                position = self.positions.get(symbol)
+                if position is not None:
+                    self._manage(position, series[symbol][index], symbol, index, close_ts)
 
             # --- 3. look for new entries ----------------------------------
             if (index - warmup) % max(config.signal_stride, 1) == 0:

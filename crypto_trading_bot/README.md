@@ -956,6 +956,38 @@ based) and tightens as more is banked. **A stop can only ever move in the
 direction that reduces risk** — widening is structurally impossible, not merely
 discouraged.
 
+#### Stops are software stops — read this before going live
+
+**The bot places no stop order on the exchange.** There is no trigger order, no
+`planorder`, nothing resting on MEXC. Stops, targets and trailing are enforced by
+the position loop, which polls every `POSITION_MANAGE_INTERVAL_SECONDS` (default
+5s) and sends a market close when a level is breached.
+
+That buys real things — structural stops that cannot be hunted off the book, and
+exits that respond to invalidation rather than only to price — but it has one
+consequence you must accept deliberately:
+
+> **If the bot is not running, your open positions have no stop.** A VPS reboot,
+> an OOM kill, a crashed process, a long network partition or a `systemctl stop`
+> all leave positions open on MEXC with nothing protecting them until the bot
+> comes back. Shutdown persists positions; it does **not** close them.
+
+Mitigations, in order of how much they actually help:
+
+1. Run under systemd with `Restart=always` (the shipped unit does) so a crash
+   self-heals in seconds. `deploy/trading-bot.service` also sets
+   `StartLimitBurst=5` so a hard crash loop stops rather than flapping forever.
+2. Keep `MAX_OPEN_POSITIONS` and `DEFAULT_RISK_PER_TRADE` small enough that an
+   unattended gap is survivable.
+3. Watch the Telegram heartbeat. Silence means the bot is down, and down means
+   unprotected.
+4. If you are going to be away and cannot monitor it, flatten first.
+
+Crash recovery restores positions from the database and reconciliation adopts
+anything the venue holds that the bot does not — with a protective ATR stop
+applied on the next pass — but that is recovery *after* the process returns, not
+protection while it is gone.
+
 ### Capital protection
 
 Circuit breakers halt on: daily loss (until the next UTC day, and manual reset
@@ -1015,9 +1047,14 @@ Three details matter more than the list:
 - **A crash is an abstention.** Every model runs through `safe_evaluate`, so one
   broken model degrades the vote instead of taking down the scan.
 
-Ensemble confidence is `margin × agreement × (0.5 + 0.5 × participation)`. All
-three terms have to be there: a narrow win, a split vote, or a vote most models
-sat out are each reasons to be less sure, not more.
+Ensemble confidence is `margin × (0.5 + 0.5 × participation)`, where
+`margin = (winning − losing) / total`. It is deliberately **not** multiplied by
+`agreement` as well: `margin == 2 × agreement − 1`, so the two are the same
+quantity and multiplying them squared the penalty. Under the old formula a 55/45
+split scored 4% and a solid 70/30 scored 22% — that was not conservatism, it was
+double-counting, and it made the downstream thresholds unreachable for reasons
+unrelated to the setup. A narrow win and a poorly-attended vote are each still
+reasons to be less sure; each is counted once.
 
 ### Dynamic weighting
 
@@ -1365,6 +1402,9 @@ Stated plainly, because you are trusting this with money:
 - **`sqrt(wᵀCw)` measures portfolio risk as volatility.** If every stop is hit
   simultaneously the realised loss is the gross sum, which is why the cluster cap
   uses gross risk.
+- **Stops are software stops.** Nothing rests on the exchange, so a position is
+  unprotected whenever the process is not running. See "Stops are software stops"
+  in section 17. This is the single largest operational risk in the design.
 - **Single-process, single-account.** No multi-account or multi-exchange support.
 - **CVD is a proxy.** MEXC's public feed carries no aggressor tape, so cumulative
   delta is estimated from close location and volume. It is labelled as a proxy

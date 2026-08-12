@@ -149,6 +149,14 @@ class ExecutionEngine:
             )
 
         fill_price = tracked.average_price or proposal.entry
+        # Risk scales with what actually filled.  Recording the planned risk on a
+        # partial fill overstates open exposure, and that inflated figure is what
+        # the portfolio limits and the correlation cluster cap are measured
+        # against -- so a half-filled entry would quietly crowd out the next
+        # trade by risk the account is not carrying.
+        fill_ratio = (
+            tracked.filled_quantity / size.contracts if size.contracts > 0 else 1.0
+        )
         position = ManagedPosition(
             symbol=proposal.symbol,
             side=proposal.side,
@@ -162,7 +170,7 @@ class ExecutionEngine:
             tp2=proposal.tp2,
             tp3=proposal.tp3,
             initial_quantity=tracked.filled_quantity,
-            risk_amount=size.actual_risk,
+            risk_amount=size.actual_risk * fill_ratio,
             opened_at=int(time.time()),
             mode=self.settings.trading_mode.value,
             fees=tracked.fees,

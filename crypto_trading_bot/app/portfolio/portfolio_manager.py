@@ -244,7 +244,60 @@ class PortfolioManager:
             position = ManagedPosition.from_row(row)
             self.positions[position.symbol] = position
         log.info("loaded %d open positions from the database", len(self.positions))
+        self.restore_breaker_state()
         return len(self.positions)
+
+    def restore_breaker_state(self) -> None:
+        """Rebuild the counters the circuit breakers trip on.
+
+        These live in memory and were previously reset to zero on every start,
+        which silently handed the operator a way to clear a tripped breaker:
+        restart the process.  That directly contradicts the guarantee
+        :mod:`app.risk.circuit_breaker` states about itself -- the daily-loss
+        breaker is supposed to be unclearable until the next UTC day, because
+        "just one more trade to make it back" is how accounts die.  With
+        ``Restart=always`` in the systemd unit, a crash loop cleared it
+        repeatedly and nobody had to decide anything.
+
+        All three figures are recomputed from what actually happened, not
+        carried over, so they survive a crash, a redeploy and a manual restart
+        alike.  A missing or unreadable database leaves the in-memory values
+        untouched: that is the conservative direction only when the values are
+        already zero at construction, so the failure is logged loudly rather
+        than passed over.
+        """
+
+        if self.repositories is None:
+            return
+        try:
+            day_start = _utc_day_start(time.time())
+            self.realized_pnl_today = self.repositories.trades.realized_pnl_since(
+                day_start, mode=self.mode
+            )
+            self.consecutive_losses = self.repositories.trades.consecutive_losses(
+                mode=self.mode
+            )
+            recorded_peak = self.repositories.account.peak_equity(mode=self.mode)
+            self.peak_equity = max(self.peak_equity, recorded_peak, self.equity)
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            log.error(
+                "could not restore circuit-breaker state: %s. Daily loss, loss "
+                "streak and peak equity start from zero for this session, so a "
+                "breach earlier today will NOT be remembered - check open risk "
+                "before letting the bot trade.",
+                exc,
+            )
+            return
+
+        self._day = _utc_day(time.time())
+        if self.realized_pnl_today or self.consecutive_losses or self.peak_equity:
+            log.info(
+                "restored breaker state: realised PnL today %+.2f, "
+                "%d consecutive loss(es), peak equity %.2f",
+                self.realized_pnl_today,
+                self.consecutive_losses,
+                self.peak_equity,
+            )
 
     def add(self, position: ManagedPosition) -> ManagedPosition:
         position.mode = self.mode
@@ -438,6 +491,12 @@ class PortfolioManager:
 
 def _utc_day(timestamp: float) -> int:
     return int(timestamp) // 86400
+
+
+def _utc_day_start(timestamp: float) -> int:
+    """Epoch seconds at 00:00 UTC of the day containing ``timestamp``."""
+
+    return _utc_day(timestamp) * 86400
 
 
 __all__ = ["PortfolioManager", "ManagedPosition"]
