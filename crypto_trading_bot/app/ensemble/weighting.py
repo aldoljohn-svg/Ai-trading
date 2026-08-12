@@ -131,7 +131,12 @@ class WeightTable:
         confidence: float,
     ) -> None:
         regime_key = regime.value if isinstance(regime, Regime) else str(regime)
-        for key in ((model, "ALL"), (model, regime_key)):
+        # dict.fromkeys keeps insertion order and drops the duplicate when the
+        # caller passes the literal regime "ALL" -- otherwise the aggregate
+        # record was written twice for the same trade, inflating its trade count
+        # and pulling its shrunk reliability further from the prior than one
+        # outcome warrants.
+        for key in dict.fromkeys(((model, "ALL"), (model, regime_key))):
             record = self._records.get(key)
             if record is None:
                 record = ModelPerformance(model=key[0], regime=key[1])
@@ -187,9 +192,29 @@ class WeightTable:
         raw: dict[str, float] = {}
         for name in names:
             reliability = self.reliability(name, regime)
-            # Map reliability onto weight with the 0.5 prior as the neutral
-            # point, so an unproven model gets an ordinary share of the vote.
-            score = max(reliability - 0.35, 0.01) ** 1.5
+            # Weight rises with reliability, proportionately.
+            #
+            # This used to be `max(reliability - 0.35, 0.01) ** 1.5`, and the
+            # offset was the problem.  Shrunk reliabilities sit in a narrow band
+            # around the 0.5 prior for small samples, so subtracting 0.35 turned
+            # that band into an enormous lever: the Beta shrinkage moved a model
+            # with one loss from 0.5000 to 0.4286 -- correctly modest -- and the
+            # transform then blew that 14% difference up into a 2.64x difference
+            # in weight.
+            #
+            # The consequence was perverse.  After a single losing trade the ten
+            # models that had an opinion were demoted to 3.9% each while the six
+            # that stayed silent -- including one that cannot vote at all and one
+            # that never votes on direction by design -- rose to 10.2% each and
+            # held 61% of the vote between them.  Weight accrued to models for
+            # not participating, and because participation is measured against
+            # total available weight, it dragged the ensemble's participation
+            # down to ~30% and blocked entries on `thin_participation`.
+            #
+            # Squaring keeps real skill rewarded -- 0.65 outweighs 0.40 by 2.6x,
+            # the same spread as before but now requiring actual evidence -- while
+            # one trade moves weight by 1.36x instead of 2.64x.
+            score = max(reliability, 0.05) ** 2
             raw[name] = score * self._overrides.get(name, 1.0)
 
         total = sum(raw.values())

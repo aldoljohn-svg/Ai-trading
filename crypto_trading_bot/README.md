@@ -1067,6 +1067,32 @@ than it earns is damped.
 When a trade loses, the models that **dissented** are credited. That is what
 stops the weighting from simply reinforcing the majority.
 
+**Weight must never accrue for not participating.** Reliability maps to weight
+as `reliability²` — proportionate, so a model that has earned a 0.65 reliability
+outweighs one at 0.40 by 2.6×, and a single resolved trade moves weight by about
+1.36×. It used to be `(reliability − 0.35)^1.5`, and the offset was the defect:
+shrunk reliabilities sit in a narrow band around the 0.5 prior for small samples,
+so subtracting 0.35 turned that band into an enormous lever. The shrinkage
+correctly moved a model with one loss from 0.5000 to 0.4286 and the transform
+then blew that 14% gap up into a 2.64× difference in weight.
+
+The consequence was perverse and showed up in the live dashboard after exactly
+one losing trade: the ten models that had formed an opinion were demoted to 3.9%
+each, while six that stayed silent — including `ml`, which cannot vote when no
+model is trained, and `portfolio_risk`, which never votes on direction by design
+— rose to 10.2% each and held **61% of the vote between them**. Because
+participation is directional weight over available weight, that dragged
+participation to ~30% and the ensemble began refusing entries on
+`thin_participation` — for a reason that had nothing to do with any setup.
+
+Two smaller defects fed the same symptom. `record()` wrote the aggregate record
+twice when the regime was literally `"ALL"`, so one trade counted as two and
+pulled reliability further from the prior than one outcome warrants. And the
+news model reported an unconfigured feed as an *abstention*; `NEWS_FEED_URL` is
+empty by default, so that fired on every symbol on every cycle and permanently
+held weight in the participation denominator while never contributing to the
+numerator. It now reports itself unavailable, which is what it is.
+
 ### The no-trade model
 
 A first-class model whose output is "don't", combined by noisy-OR across:

@@ -590,9 +590,12 @@ class NewsModel(AnalyticalModel):
 
         news = snapshot.news
         if news.sentiment is Sentiment.UNKNOWN:
-            return ModelOutput.no_signal(
-                self.name, "no news provider configured", data_quality=0.0
-            )
+            # An unconfigured feed is a structurally absent input, not a model
+            # that looked and had no view.  NEWS_FEED_URL is empty by default,
+            # so this fires on every symbol on every cycle, and as an abstention
+            # it permanently held weight in the participation denominator while
+            # never once contributing to the numerator.
+            return ModelOutput.unavailable(self.name, "no news provider configured")
         if news.blocks_entries:
             return ModelOutput(
                 name=self.name, signal=ModelSignal.NEUTRAL, confidence=0.9, risk=1.0,
