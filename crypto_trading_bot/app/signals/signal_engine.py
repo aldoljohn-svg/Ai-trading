@@ -142,10 +142,18 @@ class SignalEngine:
         )
 
         # --- 5. reward:risk gate -----------------------------------------
+        # Judged on the whole scaled exit plan, not on TP2 alone.  The position
+        # is closed in three parts, so the R that decides whether this trade is
+        # worth taking is the weighted one; TP2 is an arbitrary single point of
+        # a ladder and gating on it flatters plans with a distant TP2 and a
+        # near TP1 while punishing the reverse.  This is not a looser test --
+        # a plan that banks 40% of the size at 0.7R scores *worse* here than it
+        # did on TP2 alone.
         required_rr = settings.min_rr * strategy.min_rr_multiplier
-        if proposal.rr < required_rr:
+        if proposal.rr_plan < required_rr:
             proposal.reject(
-                f"reward:risk {proposal.rr:.2f} is below the {required_rr:.2f} "
+                f"reward:risk {proposal.rr_plan:.2f} across the exit plan "
+                f"(TP2 alone {proposal.rr:.2f}) is below the {required_rr:.2f} "
                 f"required in a {analysis.regime.regime.value} regime"
             )
 
@@ -421,12 +429,24 @@ class SignalEngine:
         ]
 
         # Deduplicate targets that sit within a fraction of ATR of each other.
-        selected: list[tuple[float, str]] = []
+        distinct: list[tuple[float, str]] = []
         for price, note in usable:
-            if all(abs(price - chosen) > 0.5 * execution.atr for chosen, _ in selected):
-                selected.append((price, note))
-            if len(selected) == 3:
-                break
+            if all(abs(price - chosen) > 0.5 * execution.atr for chosen, _ in distinct):
+                distinct.append((price, note))
+
+        # Spread the ladder across the levels that exist instead of taking the
+        # three nearest.  An active chart always has several levels close by, so
+        # "nearest three" squeezed the entire exit plan into the first ~1R and
+        # the reward:risk gate then rejected the trade for a reason the market
+        # had not supplied: BTC, DOT and AVAX were all refused at 0.88-0.98 R
+        # while further structure sat unused above them.
+        #
+        # Nothing here invents a level.  TP1 is still the first obstacle, TP3 is
+        # the furthest level we are willing to quote, TP2 sits nearest the
+        # midpoint between them.  When fewer than three levels exist the
+        # behaviour is exactly as before, and a chart whose only structure is
+        # 1.2R away is still correctly rejected.
+        selected = _spread_targets(distinct, entry)
 
         ladder = _r_multiple_targets(entry, risk, side, settings)
         prices: list[float] = []
@@ -712,6 +732,26 @@ def _r_multiple_targets(
         entry + sign * settings.tp2_r * risk,
         entry + sign * settings.tp3_r * risk,
     )
+
+
+def _spread_targets(
+    levels: Sequence[tuple[float, str]], entry: float
+) -> list[tuple[float, str]]:
+    """Pick a near / middle / far ladder from the structural levels available.
+
+    ``levels`` is ordered by distance from ``entry``, ascending.  With three or
+    fewer there is nothing to choose.  With more, taking the first three throws
+    away every level beyond the third and understates what the trade is aiming
+    at; this takes the nearest, the furthest, and whichever remaining level sits
+    closest to the midpoint between them.
+    """
+
+    if len(levels) <= 3:
+        return list(levels)
+    first, last = levels[0], levels[-1]
+    midpoint = (abs(first[0] - entry) + abs(last[0] - entry)) / 2.0
+    middle = min(levels[1:-1], key=lambda item: abs(abs(item[0] - entry) - midpoint))
+    return [first, middle, last]
 
 
 def _enforce_monotonic(

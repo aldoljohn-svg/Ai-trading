@@ -162,9 +162,13 @@ class RiskEngine:
             return decision.reject("long stop is not below entry")
         if side is Side.SHORT and proposal.stop_loss <= proposal.entry:
             return decision.reject("short stop is not above entry")
-        if proposal.rr < settings.min_rr:
+        # Same measure the signal engine gates on: the weighted R of the scaled
+        # exit plan, which is what the position actually earns.  Keeping this on
+        # TP2 alone would silently make it the binding gate.
+        if proposal.rr_plan < settings.min_rr:
             decision.reject(
-                f"reward:risk {proposal.rr:.2f} is below the {settings.min_rr:.2f} minimum"
+                f"reward:risk {proposal.rr_plan:.2f} across the exit plan is "
+                f"below the {settings.min_rr:.2f} minimum"
             )
         if proposal.confidence < settings.min_confidence:
             decision.reject(

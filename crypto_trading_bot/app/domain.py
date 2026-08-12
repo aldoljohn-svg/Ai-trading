@@ -272,6 +272,15 @@ class Ticker:
 
 @dataclass(frozen=True, slots=True)
 class OrderBook:
+    """A depth snapshot, best price first.
+
+    Levels are ``(price, size)`` where **size is in base units**, not
+    contracts -- every consumer treats ``price * size`` as a quote-currency
+    notional.  Adapters whose venue quotes depth in contracts must multiply by
+    the contract size before constructing this; see
+    :meth:`app.exchange.mexc.MexcFuturesExchange.order_book`.
+    """
+
     symbol: str
     bids: tuple[tuple[float, float], ...] = ()
     asks: tuple[tuple[float, float], ...] = ()

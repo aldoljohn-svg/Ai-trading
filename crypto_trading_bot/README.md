@@ -819,6 +819,14 @@ Four things now prevent it:
 * the scanner does not bench a symbol whose depth was throttled. Genuine depth
   failures — no such contract, an empty book — still bench exactly as before.
 
+**Depth arrives in contracts, not base units.** MEXC quotes order-book volumes
+the same way it quotes every other quantity on the contract API, so the adapter
+multiplies by `contractSize` before building an `OrderBook`. Every consumer of
+those levels computes `price × size` as a quote-currency notional, so without the
+conversion the visible depth of any symbol whose contract is not 1:1 was
+understated by exactly that factor — which is how a $565 order came to look too
+large for SHIB, one of the deepest books on the venue.
+
 **2. Screen — one timeframe per symbol.** A ticker tells you a coin is liquid;
 it says nothing about whether anything is *happening* on the chart. This stage
 pulls a single timeframe (`SCREEN_TIMEFRAME`, default 1h) for the top
@@ -877,6 +885,28 @@ by distance, de-duplicated within half an ATR, and capped at 8R. R-multiples onl
 fill gaps when no structural target exists. This is what makes the R:R gate
 meaningful: if the only thing above us is 1.2R away, the trade is correctly
 rejected.
+
+The ladder is **spread across the levels that exist**, not taken from the three
+nearest. TP1 is the first obstacle, TP3 is the furthest level worth quoting, TP2
+sits nearest the midpoint between them. Taking the three nearest was a real bug:
+an active chart always has several levels close by, so the entire exit plan was
+squeezed into the first ~1R while structure further out went unused, and the R:R
+gate then rejected the trade for a reason the market had not supplied — BTC, DOT
+and AVAX were all refused at 0.88–0.98 R in a single cycle. Nothing here invents
+a level; with three or fewer the behaviour is unchanged.
+
+### The reward:risk figure that gates
+
+The position is closed in three parts, so what decides whether a trade is worth
+taking is `rr_weighted` — the R of the whole ladder weighted by
+`TP1_CLOSE_PCT`/`TP2_CLOSE_PCT` — not TP2's ratio alone. `TradeProposal.rr_plan`
+is that number in one place, falling back to `rr` for a proposal built by hand or
+replayed from an older record. The signal engine, the risk engine, the no-trade
+model and the trade quality score all read `rr_plan`, so no layer can silently
+become the binding gate on a different definition.
+
+This is **not** a looser test. A plan that banks 40% of the size at 0.7R scores
+worse on the weighted figure than it did on TP2 alone.
 
 ### Position size
 

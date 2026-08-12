@@ -390,10 +390,19 @@ class MexcFuturesExchange(BaseExchange):
         )
         if not isinstance(data, dict):
             raise ExchangeError(f"unexpected depth payload for {symbol}")
+        # MEXC quotes depth volumes in **contracts**, like every other quantity
+        # on the contract API.  `OrderBook` levels are in base units, because
+        # every consumer of them computes a notional as `price * size`.  Without
+        # this conversion the visible depth of any symbol whose contractSize is
+        # not 1 was understated by exactly that factor -- which is why a $565
+        # order looked too large for SHIB, one of the deepest books on the venue.
+        specs = await self.contracts()
+        spec = specs.get(normalise_symbol(symbol))
+        size_multiple = spec.contract_size if spec and spec.contract_size > 0 else 1.0
         return OrderBook(
             symbol=normalise_symbol(symbol),
-            bids=tuple(_parse_levels(data.get("bids"))),
-            asks=tuple(_parse_levels(data.get("asks"))),
+            bids=tuple(_parse_levels(data.get("bids"), size_multiple)),
+            asks=tuple(_parse_levels(data.get("asks"), size_multiple)),
             ts=int(_as_float(data.get("timestamp"), 0.0) / 1000) or int(time.time()),
         )
 
@@ -755,12 +764,16 @@ def _as_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _parse_levels(levels: Any) -> list[tuple[float, float]]:
+def _parse_levels(
+    levels: Any, size_multiple: float = 1.0
+) -> list[tuple[float, float]]:
+    """``[[price, contracts, orders], ...]`` -> ``[(price, base_units), ...]``."""
+
     out: list[tuple[float, float]] = []
     for level in levels or []:
         try:
             price = float(level[0])
-            size = float(level[1])
+            size = float(level[1]) * size_multiple
         except (TypeError, ValueError, IndexError):
             continue
         if price > 0 and size > 0:

@@ -38,8 +38,8 @@ class TradeProposal:
     tp1: float = 0.0
     tp2: float = 0.0
     tp3: float = 0.0
-    rr: float = 0.0                     # reward:risk to TP2 - the gated figure
-    rr_weighted: float = 0.0            # expected R including the partial ladder
+    rr: float = 0.0                     # reward:risk to TP2 alone
+    rr_weighted: float = 0.0            # expected R across the whole exit ladder
     confidence: float = 0.0             # 0..1, never 1.0
     atr: float = 0.0
     stop_distance: float = 0.0
@@ -67,6 +67,19 @@ class TradeProposal:
     @property
     def opportunity_score(self) -> float:
         return self.scores.blended()
+
+    @property
+    def rr_plan(self) -> float:
+        """The reward:risk figure every gate judges, in one place.
+
+        The position is closed in three parts, so what decides whether a trade
+        is worth taking is the weighted R of the whole ladder, not TP2's ratio.
+        Falls back to ``rr`` when the ladder was never computed -- a proposal
+        built by hand, or replayed from a record written before the weighted
+        figure existed -- so an unset field cannot silently reject everything.
+        """
+
+        return self.rr_weighted if self.rr_weighted > 0 else self.rr
 
     @property
     def risk_per_unit(self) -> float:

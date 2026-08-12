@@ -316,7 +316,9 @@ class IntelligenceCoordinator:
         stop_distance_pct = (
             proposal.stop_distance / proposal.entry if proposal.entry > 0 else 0.0
         )
-        expected_reward_pct = stop_distance_pct * proposal.rr if proposal.rr else 0.0
+        expected_reward_pct = (
+            stop_distance_pct * proposal.rr_plan if proposal.rr_plan else 0.0
+        )
         verdict.execution_risk = assess_execution_risk(
             context.microstructure,
             taker_fee=settings.taker_fee,
@@ -331,7 +333,7 @@ class IntelligenceCoordinator:
         verdict.no_trade = self.no_trade_model.evaluate(
             ensemble,
             context,
-            rr=proposal.rr,
+            rr=proposal.rr_plan,
             min_rr=settings.min_rr,
             loss_cluster=loss_cluster,
             execution_risk=verdict.execution_risk.score,
@@ -351,7 +353,7 @@ class IntelligenceCoordinator:
             regime=analysis.regime.regime,
             order_flow=context.order_flow,
             liquidity=context.liquidity,
-            rr=proposal.rr,
+            rr=proposal.rr_plan,
             min_rr=settings.min_rr,
             data_risk=verdict.data_risk,
             model_risk=verdict.model_risk,
@@ -361,18 +363,33 @@ class IntelligenceCoordinator:
         )
 
         # --- expected value --------------------------------------------------------
+        # The R-multiples of the targets that were actually proposed, not the
+        # configured defaults.  Targets are structural, so a plan whose TP1 sits
+        # at 0.7R and whose TP3 sits at 4R has an expected value nothing like
+        # the one implied by TP1_R/TP2_R/TP3_R, and using the config values here
+        # meant every symbol was valued on the same hypothetical ladder.
+        fractions = (
+            settings.tp1_close_pct,
+            settings.tp2_close_pct,
+            max(0.0, 1 - settings.tp1_close_pct - settings.tp2_close_pct),
+        )
+        defaults = (settings.tp1_r, settings.tp2_r, settings.tp3_r)
+        risk_distance = proposal.stop_distance
         ladder = [
-            (settings.tp1_close_pct, settings.tp1_r),
-            (settings.tp2_close_pct, settings.tp2_r),
             (
-                max(0.0, 1 - settings.tp1_close_pct - settings.tp2_close_pct),
-                settings.tp3_r,
-            ),
+                fraction,
+                abs(target - proposal.entry) / risk_distance
+                if risk_distance > 0 and target > 0
+                else default,
+            )
+            for fraction, target, default in zip(
+                fractions, (proposal.tp1, proposal.tp2, proposal.tp3), defaults
+            )
         ]
         cost_pct = verdict.execution_risk.total_cost_pct
         verdict.expected_value = compute_expected_value(
             confidence=proposal.confidence,
-            rr=proposal.rr,
+            rr=proposal.rr_plan,
             cost_pct=cost_pct,
             stop_distance_pct=stop_distance_pct,
             partial_ladder=ladder,
