@@ -290,3 +290,109 @@ class TestStopsAreSoftwareOnly:
         text = readme.read_text(encoding="utf-8").lower()
         assert "software stop" in text or "no stop order" in text
         assert "unprotected" in text
+
+
+class TestTheJournalAgreesWithItself:
+    """The header and the rejection reason must show the same number.
+
+    The live journal read::
+
+        LINKUSDT LONG quality 42 EV +0.68R
+           trade quality 41 below the 55 minimum
+
+    The rejection text formats ``score`` directly; the journal row stores
+    ``as_dict()``'s ``round(score, 2)`` and the Telegram header formats that.
+    A raw score near a ``.x95`` boundary went through Python's round-half-to-even
+    at two different precisions and disagreed by a point -- in either direction,
+    which is why it did not look like a rounding artifact at first.
+    """
+
+    def _quality(self, **kwargs):
+        from app.domain import Regime
+        from app.ensemble.base import ModelSignal
+        from app.quality.trade_quality import compute_trade_quality
+
+        class Ensemble:
+            signal = ModelSignal.LONG
+            agreement = 0.72
+            participation = 0.61
+            dissent = 0.28
+            data_quality = 0.83
+            aggregate_risk = 0.25
+            confidence = 0.4137
+
+        return compute_trade_quality(
+            ensemble=Ensemble(), regime=Regime.TREND_UP, rr=2.13, min_rr=1.7, **kwargs
+        )
+
+    def test_the_score_is_already_rounded_to_its_stored_precision(self):
+        quality = self._quality()
+        assert quality.score == round(quality.score, 2)
+
+    def test_both_display_paths_render_the_same_integer(self):
+        quality = self._quality()
+        from_reason = f"{quality.score:.0f}"
+        from_journal = f"{quality.as_dict()['score']:.0f}"
+        assert from_reason == from_journal
+
+    def test_it_holds_across_the_awkward_boundaries(self):
+        """Sweep the .x95 and .x5 region where the two disagreed."""
+
+        from app.quality.trade_quality import TradeQuality
+
+        for raw in (41.495, 41.4999, 46.5, 46.502, 54.995, 55.005):
+            quality = TradeQuality(score=round(raw, 2))
+            assert f"{quality.score:.0f}" == f"{quality.as_dict()['score']:.0f}"
+
+
+class TestTheColdStartTaxIsBoundedAndDecays:
+    """A fresh install is penalised for having no record. That is deliberate.
+
+    What matters is that it *ramps off* as outcomes accumulate rather than
+    sitting there forever: a penalty that cannot be worked off would be a
+    bootstrap trap, because the trades that would earn the experience are the
+    ones it is blocking.
+    """
+
+    def _risk(self, resolved: int):
+        from app.ensemble.weighting import WeightTable
+        from app.quality.model_risk import assess_model_risk
+
+        table = WeightTable()
+        for i in range(resolved):
+            table.record(
+                "technical", "TREND_UP", won=i % 2 == 0,
+                r_multiple=1.0 if i % 2 == 0 else -1.0, confidence=0.6,
+            )
+
+        class Output:
+            name = "technical"
+            confidence = 0.6
+
+        class Ensemble:
+            dissent = 0.15
+            participation = 0.6
+            outputs = [Output()]
+
+        class Predictor:
+            def info(self):
+                return {"loaded": False}
+
+        return assess_model_risk(
+            Ensemble(), weight_table=table, predictor=Predictor(), regime="TREND_UP"
+        ).score
+
+    def test_a_fresh_install_is_penalised(self):
+        assert self._risk(0) > 0.3
+
+    def test_the_penalty_falls_monotonically_with_experience(self):
+        scores = [self._risk(n) for n in (0, 5, 10, 15, 20)]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_it_is_largely_worked_off_by_the_threshold(self):
+        assert self._risk(20) < 0.1
+
+    def test_it_never_alone_blocks_a_trade(self):
+        """It costs a fraction of quality; it is not a veto."""
+
+        assert 1.0 - 0.5 * self._risk(0) > 0.75

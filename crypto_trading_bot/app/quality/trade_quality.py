@@ -192,7 +192,15 @@ def compute_trade_quality(
 
     quality.components = {k: _clip(v, 0.0, 100.0) for k, v in components.items()}
     quality.penalties = penalties
-    quality.score = _clip(base * multiplier, 0.0, 100.0)
+    # Rounded once, here, so every consumer formats the same number.  The
+    # rejection text renders `score` directly while the journal stores
+    # `as_dict()`'s `round(score, 2)`; with a raw score near a .x95 boundary
+    # those two went through Python's round-half-to-even at different
+    # precisions and disagreed by one point in either direction -- the journal
+    # showed "quality 42" above a reason saying "trade quality 41 below the 55
+    # minimum".  Cosmetic, but an audit trail that contradicts itself is not
+    # much of an audit trail.
+    quality.score = round(_clip(base * multiplier, 0.0, 100.0), 2)
     quality.grade = _grade(quality.score)
     quality.acceptable = quality.score >= minimum
     quality.notes = notes
