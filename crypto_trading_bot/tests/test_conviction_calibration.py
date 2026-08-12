@@ -234,3 +234,104 @@ class TestUnknownIsNotZero:
             ensemble=_Ensemble(0.55, 0.4), regime=Regime.TRANSITION, rr=0.0, min_rr=1.7
         )
         assert not weak.acceptable
+
+
+class TestParticipationCountsOnlyRealVoters:
+    """An untrained model is not an undecided voter.
+
+    Counting a model with no data source against participation permanently caps
+    conviction for a reason unrelated to the setup, and that depressed
+    conviction is then penalised again through model risk and trade quality.
+    """
+
+    def _context(self):
+        from app.ensemble.base import ModelContext
+
+        return ModelContext(symbol="BTCUSDT", ts=0, analysis=None)
+
+    def test_unavailable_is_distinct_from_an_abstention(self):
+        from app.ensemble.base import ModelOutput
+
+        abstained = ModelOutput.no_signal("ict", "no clear structure")
+        absent = ModelOutput.unavailable("ml", "no trained model loaded")
+        assert abstained.available
+        assert not absent.available
+        # Both are still non-votes.
+        assert not abstained.usable and not absent.usable
+
+    def test_an_absent_model_does_not_dilute_participation(self):
+        from app.ensemble.base import AnalyticalModel, ModelOutput, ModelSignal
+        from app.ensemble.engine import EnsembleEngine
+
+        class Voter(AnalyticalModel):
+            name = "voter"
+            family = "technical"
+
+            def evaluate(self, context):
+                return ModelOutput(
+                    name=self.name, signal=ModelSignal.LONG, confidence=0.8
+                )
+
+        class Absent(AnalyticalModel):
+            name = "absent"
+            family = "learned"
+
+            def evaluate(self, context):
+                return ModelOutput.unavailable(self.name, "no trained model")
+
+        class Abstainer(AnalyticalModel):
+            name = "abstainer"
+            family = "technical"
+
+            def evaluate(self, context):
+                return ModelOutput.no_signal(self.name, "looked, no view")
+
+        # One voter alongside one structurally absent model: full participation.
+        with_absent = EnsembleEngine(models=[Voter(), Absent()]).evaluate(
+            self._context()
+        )
+        assert with_absent.participation == pytest.approx(1.0)
+
+        # One voter alongside a genuine abstention: half.
+        with_abstainer = EnsembleEngine(models=[Voter(), Abstainer()]).evaluate(
+            self._context()
+        )
+        assert with_abstainer.participation < 1.0
+
+    def test_a_genuine_abstention_still_counts_against_participation(self):
+        """Fixing the dilution must not make every non-vote free."""
+
+        from app.ensemble.base import AnalyticalModel, ModelOutput, ModelSignal
+        from app.ensemble.engine import EnsembleEngine
+
+        class Voter(AnalyticalModel):
+            name = "voter"
+            family = "technical"
+
+            def evaluate(self, context):
+                return ModelOutput(
+                    name=self.name, signal=ModelSignal.LONG, confidence=0.8
+                )
+
+        class Abstainer(AnalyticalModel):
+            name = "abstainer"
+            family = "technical"
+
+            def evaluate(self, context):
+                return ModelOutput.no_signal(self.name, "no view")
+
+        result = EnsembleEngine(
+            models=[Voter(), Abstainer(), Abstainer()]
+        ).evaluate(self._context())
+        assert result.participation < 0.6
+
+    def test_the_real_models_report_absence_where_it_is_structural(self):
+        """The ML and news models must not look like undecided voters."""
+
+        from app.ensemble.models import MachineLearningModel, NewsModel
+
+        context = self._context()
+        ml = MachineLearningModel().safe_evaluate(context)
+        news = NewsModel().safe_evaluate(context)
+        assert not ml.available, "an untrained model was never in the room"
+        assert not news.available, "an unconfigured feed was never in the room"

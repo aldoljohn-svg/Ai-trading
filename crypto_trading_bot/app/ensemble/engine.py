@@ -204,10 +204,13 @@ class EnsembleEngine:
                 quality_weighted += weight * output.data_quality
                 quality_total += weight
 
-            # Only models that can vote count toward participation.
+            # Only models that *could* vote count toward participation.
+            # Excluded: the risk family, which never takes a side, and any
+            # model reporting itself unavailable because it has no data source
+            # at all.  An untrained ML model is not an undecided voter.
             model = next((m for m in self.models if m.name == output.name), None)
             votes_on_direction = model is None or model.family != "risk"
-            if votes_on_direction:
+            if votes_on_direction and output.available:
                 available_weight += weight
 
             if not output.usable or not output.signal.is_directional:

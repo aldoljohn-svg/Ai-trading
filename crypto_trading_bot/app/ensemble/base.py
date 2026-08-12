@@ -124,6 +124,9 @@ class ModelOutput:
     reasoning: list[str] = field(default_factory=list)
     detail: dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    #: False when the model has no data source and could never have voted.
+    #: Excluded from the participation denominator; see `unavailable`.
+    available: bool = True
 
     def __post_init__(self) -> None:
         self.confidence = _clip(self.confidence)
@@ -167,11 +170,41 @@ class ModelOutput:
 
     @classmethod
     def no_signal(cls, name: str, reason: str, data_quality: float = 0.0) -> "ModelOutput":
+        """The model looked at this bar and formed no view.
+
+        A genuine abstention.  It counts against participation, because a model
+        that could have spoken and did not is telling you something.
+        """
+
         return cls(
             name=name,
             signal=ModelSignal.NO_SIGNAL,
             data_quality=data_quality,
             error=reason,
+        )
+
+    @classmethod
+    def unavailable(cls, name: str, reason: str) -> "ModelOutput":
+        """The model has no data source at all and was never able to vote.
+
+        Structurally different from an abstention, and the difference matters.
+        An untrained ML model or an unconfigured news feed is not *undecided* --
+        it was never in the room.  Counting it against participation
+        permanently caps the ensemble's conviction for a reason that has
+        nothing to do with the setup being looked at, and then that depressed
+        conviction is penalised again through model risk and trade quality.
+
+        These outputs are excluded from the participation denominator entirely,
+        so participation measures "how many of the models that *could* vote
+        did" rather than "how much of the system is configured".
+        """
+
+        return cls(
+            name=name,
+            signal=ModelSignal.NO_SIGNAL,
+            data_quality=0.0,
+            error=reason,
+            available=False,
         )
 
 

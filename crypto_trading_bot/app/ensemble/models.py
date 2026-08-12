@@ -489,7 +489,7 @@ class DerivativesModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         derivatives = context.derivatives
         if derivatives is None:
-            return ModelOutput.no_signal(self.name, "no funding/OI data")
+            return ModelOutput.unavailable(self.name, "no funding/OI data")
         if not derivatives.available:
             return ModelOutput.no_signal(
                 self.name, "funding/OI unavailable", data_quality=0.0
@@ -528,7 +528,7 @@ class MacroModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         snapshot = context.fundamentals
         if snapshot is None:
-            return ModelOutput.no_signal(self.name, "no fundamental snapshot")
+            return ModelOutput.unavailable(self.name, "no fundamental snapshot")
 
         macro = snapshot.macro
         if macro.btc_trend is Sentiment.UNKNOWN and macro.market_breadth is None:
@@ -583,7 +583,7 @@ class NewsModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         snapshot = context.fundamentals
         if snapshot is None:
-            return ModelOutput.no_signal(self.name, "no news assessment")
+            return ModelOutput.unavailable(self.name, "no news assessment")
 
         news = snapshot.news
         if news.sentiment is Sentiment.UNKNOWN:
@@ -626,7 +626,7 @@ class SentimentModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         snapshot = context.fundamentals
         if snapshot is None:
-            return ModelOutput.no_signal(self.name, "no sentiment inputs")
+            return ModelOutput.unavailable(self.name, "no sentiment inputs")
 
         score = 0.0
         reasons: list[str] = []
@@ -651,7 +651,7 @@ class SentimentModel(AnalyticalModel):
             reasons.append(f"Fear & Greed {fear_greed:.0f}")
 
         if quality <= 0:
-            return ModelOutput.no_signal(self.name, "no sentiment data", data_quality=0.0)
+            return ModelOutput.unavailable(self.name, "no sentiment data")
         if abs(score) < 0.2:
             return ModelOutput(
                 name=self.name, signal=ModelSignal.NEUTRAL, confidence=0.25,
@@ -676,9 +676,7 @@ class MachineLearningModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         predictor = context.predictor
         if predictor is None or not getattr(predictor, "ready", False):
-            return ModelOutput.no_signal(
-                self.name, "no trained model loaded", data_quality=0.0
-            )
+            return ModelOutput.unavailable(self.name, "no trained model loaded")
 
         features = context.features or {}
         if not features:
