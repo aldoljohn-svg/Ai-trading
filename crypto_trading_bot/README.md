@@ -1225,7 +1225,7 @@ crypto_trading_bot/
 │   ├── dashboard/               API, websocket, stdlib fallback, frontend
 │   ├── database/                schema, DB-API layer, repositories
 │   └── health/                  health monitor, live pre-flight
-├── tests/                       597 tests
+├── tests/                       616 tests
 ├── deploy/                      systemd unit
 ├── scripts/                     backtest, train, simulate, healthcheck, backup
 ├── data/  logs/  models/

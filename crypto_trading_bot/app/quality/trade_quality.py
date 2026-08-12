@@ -92,12 +92,16 @@ def compute_trade_quality(
 
     # --- signal ----------------------------------------------------------
     if ensemble is not None:
-        # Conviction and unanimity both matter; a loud minority is not quality.
-        components["signal"] = 100.0 * (
-            0.55 * ensemble.confidence
-            + 0.25 * ensemble.agreement
-            + 0.20 * ensemble.participation
+        # Ensemble confidence already *is* margin scaled by participation, so
+        # re-adding agreement and participation here applied the same two
+        # quantities a second time and dragged every score down.  Data quality
+        # is a genuinely separate axis: a strong vote taken on thin data is
+        # worth less than the same vote on good data, and that is not
+        # represented anywhere else in this component.
+        quality_factor = 0.6 + 0.4 * _clip(
+            float(getattr(ensemble, "data_quality", 1.0) or 0.0), 0.0, 1.0
         )
+        components["signal"] = 100.0 * ensemble.confidence * quality_factor
     else:
         components["signal"] = 0.0
 

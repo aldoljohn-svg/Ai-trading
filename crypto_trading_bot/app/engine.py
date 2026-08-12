@@ -199,7 +199,23 @@ class TradingEngine:
         news = NewsEngine(
             calendar_path=settings.resolve_path(settings.data_dir)
             / "economic_calendar.json",
+            # Without both of these the news assessment stays UNKNOWN, which is
+            # the honest answer -- it never invents a sentiment from nothing.
+            feed_url=settings.news_feed_url,
+            http_client=http_client,
+            blackout_before_seconds=int(
+                settings.news_blackout_before_minutes * 60
+            ),
+            blackout_after_seconds=int(settings.news_blackout_after_minutes * 60),
+            max_news_age_seconds=int(settings.news_max_age_hours * 3600),
         )
+        if settings.news_feed_url:
+            log.info("news feed configured: %s", settings.news_feed_url)
+        else:
+            log.info(
+                "no news feed configured - macro context (BTC trend, funding, "
+                "open interest) still comes from the exchange"
+            )
         fundamentals = FundamentalEngine(macro, news, exchange=self.exchange)
 
         self.scanner = Scanner(

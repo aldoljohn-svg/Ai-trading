@@ -27,7 +27,7 @@ from typing import Any
 
 from app.compat import HAVE_YAML, yaml
 # ``app.domain`` imports nothing from the project, so this cannot cycle.
-from app.domain import Timeframe
+from app.domain import EXECUTION_TIMEFRAMES, Timeframe
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -276,6 +276,10 @@ class Settings:
     #: deep analysis simply takes the top of the ticker-based pre-screen.
     screen_count: int = 60
     screen_timeframe: str = "1h"
+    #: The timeframe entries are timed on.  Higher timeframes still supply
+    #: context and bias; this is the one the entry, stop and target geometry is
+    #: measured against, and the one the ML labels are built from.
+    execution_timeframe: str = "15m"
     #: Concurrency for each stage.  The screen is one fetch per symbol so it can
     #: run wider than deep analysis, which is six.
     screen_concurrency: int = 12
@@ -314,6 +318,23 @@ class Settings:
     min_stop_pct: float = 0.0015
 
     # --- ml --------------------------------------------------------------
+    # --- fundamentals ----------------------------------------------------
+    #: Optional JSON news feed.  Macro context (BTC trend, funding, open
+    #: interest) always comes from the exchange and needs no configuration;
+    #: this adds a headline feed on top.  Left empty, the news assessment
+    #: reports UNKNOWN rather than inventing a sentiment.
+    #:
+    #: Whatever it points at must return JSON that
+    #: :func:`app.fundamental.news_engine.parse_news_payload` understands: a
+    #: list of objects, or an object with a "data"/"results"/"articles" key,
+    #: each carrying a title and a timestamp.
+    news_feed_url: str = ""
+    news_max_age_hours: float = 6.0
+    #: Minutes either side of a high-impact calendar event during which new
+    #: entries are blocked.  Populate data/economic_calendar.json to use this.
+    news_blackout_before_minutes: float = 30.0
+    news_blackout_after_minutes: float = 15.0
+
     ml_enabled: bool = True
     ml_model_name: str = "direction_v1"
     ml_min_training_rows: int = 400
@@ -683,6 +704,22 @@ def validate(settings: Settings) -> Settings:
     if settings.screen_timeframe not in {t.value for t in Timeframe}:
         errors.append(
             f"screen_timeframe={settings.screen_timeframe} is not a known timeframe"
+        )
+    if settings.news_feed_url and not settings.news_feed_url.startswith(
+        ("http://", "https://")
+    ):
+        errors.append("news_feed_url must be an http(s) URL")
+    if settings.news_max_age_hours <= 0:
+        errors.append("news_max_age_hours must be > 0")
+    for name in ("news_blackout_before_minutes", "news_blackout_after_minutes"):
+        if getattr(settings, name) < 0:
+            errors.append(f"{name} must be >= 0")
+    if settings.execution_timeframe not in {t.value for t in EXECUTION_TIMEFRAMES}:
+        allowed = ", ".join(t.value for t in EXECUTION_TIMEFRAMES)
+        errors.append(
+            f"execution_timeframe={settings.execution_timeframe} is not one of "
+            f"the supported execution timeframes ({allowed}); higher timeframes "
+            "supply context, they are not where entries are timed"
         )
     if not (0.0 <= settings.min_trade_quality <= 100.0):
         errors.append("min_trade_quality must be within [0, 100]")

@@ -251,12 +251,18 @@ class EnsembleEngine:
             result.confidence = 0.0
             return result
 
-        # Margin of victory, scaled by how unanimous and how well-attended the
-        # vote was.  A 51/49 split at full participation is still a coin flip.
+        # Margin of victory, scaled by how well-attended the vote was.  A 51/49
+        # split at full participation is still a coin flip, and the margin says
+        # so on its own: it runs from 0 at a dead heat to 1 at unanimity.
+        #
+        # It is deliberately NOT multiplied by `agreement` as well.  The two are
+        # the same quantity -- margin == 2 * agreement - 1 -- so multiplying
+        # them squares the penalty and crushes every ordinary vote toward zero.
+        # A 55/45 split scored 4% conviction under that formula and 8% under
+        # this one; a solid 70/30 went from 22% to 32%.  The old numbers were
+        # not conservatism, they were double-counting.
         margin = (winning - losing) / total_vote
-        result.confidence = _clip01(
-            margin * result.agreement * (0.5 + 0.5 * result.participation)
-        )
+        result.confidence = _clip01(margin * (0.5 + 0.5 * result.participation))
         return result
 
     # -- learning ---------------------------------------------------------
