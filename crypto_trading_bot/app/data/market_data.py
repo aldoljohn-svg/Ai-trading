@@ -309,6 +309,21 @@ class MarketData:
         self._books[key] = (time.time(), book)
         return book
 
+    def cached_depth(self, symbol: str, pct: float = 0.005) -> float | None:
+        """Quote-currency depth from the last book we saw, or ``None``.
+
+        Synchronous and non-fetching, so the paper engine can consult it inside
+        a fill without turning a simulated order into a network round trip.
+        ``None`` means "no book cached", which callers must not treat as "no
+        liquidity" -- see :meth:`app.paper.paper_engine.PaperEngine._slippage`.
+        """
+
+        cached = self._books.get(symbol.upper())
+        if cached is None or time.time() - cached[0] > self.book_stale_ttl:
+            return None
+        book = cached[1]
+        return book.depth_quote("bid", pct) + book.depth_quote("ask", pct)
+
     def _stale_book(self, key: str, now: float) -> OrderBook | None:
         cached = self._books.get(key)
         if cached is None or now - cached[0] > self.book_stale_ttl:

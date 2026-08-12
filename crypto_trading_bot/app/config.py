@@ -451,6 +451,31 @@ class Settings:
                 values.append(value)
         return values
 
+    def __repr__(self) -> str:
+        """Never render the API secret, access key or bot token.
+
+        A frozen dataclass gets an auto-generated ``__repr__`` that prints every
+        field, so ``repr(settings)`` -- and therefore ``str(settings)``, an
+        f-string, a ``print``, a traceback that renders locals, or any handler
+        that formats the object -- exposed all three credentials in full.  The
+        redaction filter in :mod:`app.logger` only covers text that reaches a
+        log handler, so it does not help on any of those paths.
+
+        This routes both ``repr`` and ``str`` through the same masking as
+        :meth:`redacted`, which is the only representation that was ever safe.
+        """
+
+        shown = ", ".join(
+            f"{name}={value!r}"
+            for name, value in (
+                ("trading_mode", self.trading_mode.value),
+                ("mexc_access_key", _mask(self.mexc_access_key)),
+                ("mexc_secret_key", _mask(self.mexc_secret_key)),
+                ("telegram_bot_token", _mask(self.telegram_bot_token)),
+            )
+        )
+        return f"Settings({shown}, ...)"
+
     def redacted(self) -> dict[str, Any]:
         """A dict safe to log, print, serve over HTTP or send to Telegram."""
 

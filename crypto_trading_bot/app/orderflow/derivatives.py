@@ -173,7 +173,10 @@ def analyse_derivatives(
 
     read.data_quality = quality
     read.direction = 1 if score > 0.3 else (-1 if score < -0.3 else 0)
-    read.confidence = min(abs(score) / 1.5, 1.0) * quality
+    # Certainty in the read itself.  `quality` is reported separately and every
+    # consumer applies it; multiplying it in here charged the same discount
+    # twice.  See the note in `app.orderflow.order_flow`.
+    read.confidence = min(abs(score) / 1.5, 1.0)
     read.reasoning = reasons
     return read
 

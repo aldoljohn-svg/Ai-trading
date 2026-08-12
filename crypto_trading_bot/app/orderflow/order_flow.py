@@ -226,7 +226,15 @@ def analyse_order_flow(
         reasons.append("buy and sell pressure are balanced")
     else:
         read.state = "BUY_PRESSURE" if read.score > 0 else "SELL_PRESSURE"
-        read.confidence = _clip01(min(magnitude * 1.8, 1.0) * read.data_quality)
+        # Certainty in the read, NOT discounted by data quality.  Every consumer
+        # discounts by `data_quality` itself -- `ModelOutput.effective_confidence`
+        # multiplies the two, and `compute_trade_quality` scales the order-flow
+        # component by it as well -- so applying it here too meant the same
+        # haircut landed twice, and three times on the way into trade quality.
+        # With no aggressor tape (MEXC exposes none) base quality is 0.55, so a
+        # full read scored 0.80: the double application turned that into 0.64
+        # for no reason connected to the flow itself.
+        read.confidence = _clip01(min(magnitude * 1.8, 1.0))
         reasons.append(
             f"net {'buying' if read.score > 0 else 'selling'} pressure "
             f"(score {read.score:+.2f})"

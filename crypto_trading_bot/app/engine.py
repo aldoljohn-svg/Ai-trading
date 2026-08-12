@@ -346,8 +346,18 @@ class TradingEngine:
             slippage_pct=settings.slippage_pct,
             latency_ms=settings.latency_ms,
             funding_interval_hours=settings.funding_interval_hours,
+            #: Without this the simulator charged one flat slippage regardless of
+            #: order size, so paper results flattered exactly the trades most
+            #: likely to disappoint in live -- the large ones against a thin
+            #: book.  Reads the cached book only; never fetches.
+            depth_provider=self._cached_depth,
         )
         return self.paper
+
+    def _cached_depth(self, symbol: str) -> float | None:
+        if self.market_data is None:
+            return None
+        return self.market_data.cached_depth(symbol)
 
     def _price_for(self, symbol: str) -> float:
         if self.portfolio is None:

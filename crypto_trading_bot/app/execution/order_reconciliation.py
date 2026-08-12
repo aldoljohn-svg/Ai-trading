@@ -117,6 +117,20 @@ class Reconciler:
             log.error("reconciliation could not read the exchange: %s", exc)
             return report
 
+        # Contract specs are needed to adopt a position with the right size
+        # multiple.  A failure here must not abort reconciliation -- knowing the
+        # venue holds a position we do not is far more urgent than sizing it
+        # perfectly -- so it degrades to the per-position fallback in `_adopt`.
+        specs: Mapping[str, Any] = {}
+        try:
+            specs = await self.exchange.contracts()
+        except Exception as exc:  # noqa: BLE001 - enrichment must never abort this
+            log.warning("could not load contract specs for reconciliation: %s", exc)
+
+        def size_of(symbol: str) -> float | None:
+            spec = specs.get(symbol.upper())
+            return spec.contract_size if spec and spec.contract_size > 0 else None
+
         local = {p.symbol.upper(): p for p in self.portfolio.all()}
         remote = {p.symbol.upper(): p for p in venue_positions}
         report.checked_positions = len(set(local) | set(remote))
@@ -144,7 +158,7 @@ class Reconciler:
                 )
             )
             if apply and self.adopt_unknown:
-                self._adopt(position)
+                self._adopt(position, contract_size=size_of(symbol))
                 report.adopted.append(symbol)
 
         # --- positions we have that the venue does not --------------------
@@ -187,7 +201,9 @@ class Reconciler:
                     )
                 )
                 if apply:
-                    self._adopt(theirs, existing=ours)
+                    self._adopt(
+                        theirs, existing=ours, contract_size=size_of(symbol)
+                    )
                     report.corrected.append(symbol)
                 continue
 
@@ -287,7 +303,10 @@ class Reconciler:
     # -- actions ----------------------------------------------------------
 
     def _adopt(
-        self, position: ExchangePosition, existing: ManagedPosition | None = None
+        self,
+        position: ExchangePosition,
+        existing: ManagedPosition | None = None,
+        contract_size: float | None = None,
     ) -> ManagedPosition:
         """Take ownership of an externally-created position.
 
@@ -295,9 +314,18 @@ class Reconciler:
         **no stop and no targets**, flagged as unmanaged.  The position manager
         will place a protective ATR stop on its next pass, and the operator is
         alerted immediately.
+
+        ``contract_size`` must come from the venue's contract spec.  It used to
+        be hardcoded to 1.0, which is wrong for most MEXC contracts and silently
+        corrupted every quantity derived from this position: notional, exposure,
+        portfolio risk and PnL were all off by the contract size.  For BTC
+        (0.0001) that overstates exposure ten-thousand-fold, which would trip the
+        portfolio limits and block every subsequent trade; for SHIB (10,000) it
+        understates it by the same factor, which is worse.
         """
 
-        contract_size = 1.0
+        if contract_size is None or contract_size <= 0:
+            contract_size = existing.contract_size if existing else 1.0
         adopted = ManagedPosition(
             symbol=position.symbol,
             side=position.side,

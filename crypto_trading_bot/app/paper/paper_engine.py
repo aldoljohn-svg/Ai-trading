@@ -90,7 +90,7 @@ class PaperEngine:
         slippage_pct: float = 0.0005,
         latency_ms: int = 250,
         funding_interval_hours: int = 8,
-        depth_provider: Callable[[str], float] | None = None,
+        depth_provider: Callable[[str], float | None] | None = None,
         simulate_latency: bool = False,
     ) -> None:
         self.price_provider = price_provider
@@ -140,7 +140,13 @@ class PaperEngine:
         return float(price)
 
     def _slippage(self, symbol: str, notional: float) -> float:
-        """Adverse slippage as a fraction, scaled by size versus depth."""
+        """Adverse slippage as a fraction, scaled by size versus depth.
+
+        A provider returning ``None`` means *no book was cached*, which is not
+        the same as a book with nothing in it: unknown depth gets the flat base
+        slippage, an empty book gets the punitive multiple.  Conflating the two
+        would tax every symbol whose depth simply had not been fetched yet.
+        """
 
         base = self.slippage_pct
         if self.depth_provider is None:
@@ -148,6 +154,8 @@ class PaperEngine:
         try:
             depth = self.depth_provider(symbol)
         except Exception:  # noqa: BLE001
+            return base
+        if depth is None:
             return base
         if depth <= 0:
             return base * 3

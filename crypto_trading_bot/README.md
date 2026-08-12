@@ -1164,6 +1164,47 @@ trades could be.
 - It will not let social media trigger a trade. Sentiment is one damped vote
   among sixteen and can only ever reduce conviction.
 
+### Two invariants the scoring layers must hold
+
+Both have been violated more than once, in different places, and each violation
+looked like conservatism while actually being arithmetic error. They are worth
+stating explicitly because every new scoring component is a chance to break them
+again.
+
+**Data quality is charged exactly once.** A read's `confidence` is its certainty
+in what it is saying; `data_quality` is how complete the evidence was. They are
+separate axes and each consumer applies the discount itself —
+`ModelOutput.effective_confidence` multiplies the two, and
+`compute_trade_quality` scales the order-flow component by it. A producer that
+also pre-multiplies its own confidence by its quality charges the haircut twice,
+and three times on the path into trade quality. `OrderFlowRead` and
+`DerivativesRead` both did; with no aggressor tape on MEXC, base quality is 0.55,
+so a complete flow read scored 0.80 and the double application silently turned it
+into 0.64 for reasons unconnected to the flow.
+
+**A missing input is not an abstention.** `ModelOutput.no_signal` means the model
+looked at this bar and formed no view — that counts against participation,
+because a model that could have spoken and did not is telling you something.
+`ModelOutput.unavailable` means the model had no data source and was never in the
+room; it is excluded from the participation denominator entirely. Reporting an
+absent input as an abstention permanently caps conviction for a reason unrelated
+to the setup, and that depressed conviction is then penalised again through model
+risk and trade quality. The order-flow, liquidity and portfolio-risk models each
+had this wrong.
+
+### Positions adopted from the exchange
+
+A position the venue reports and the bot did not open is adopted flat and
+unmanaged, and **its contract size comes from the venue's contract spec**. That
+was hardcoded to 1.0, which is wrong for most MEXC contracts and corrupted every
+quantity derived from the position — notional, exposure, correlation-adjusted
+portfolio risk, PnL. For BTC (0.0001) it overstated exposure ten-thousand-fold,
+enough to trip the portfolio limits and block every later trade; for SHIB
+(10,000) it understated it by the same factor, which is worse. If the specs
+cannot be loaded, reconciliation still completes — knowing the venue holds a
+position you do not is more urgent than sizing it perfectly — and falls back to
+1.0 with a warning.
+
 ---
 
 ## 19. Troubleshooting
@@ -1232,6 +1273,17 @@ Secrets never reach logs, Telegram or the dashboard: keys are registered with th
 log filter at startup, and secret-shaped strings (`apiKey=`, JSON `"secret"`,
 bot-token URLs, `Signature:`) are scrubbed by pattern even if they were never
 registered.
+
+`Settings` also defines its own `__repr__`. That is not cosmetic: it is a frozen
+dataclass, so the auto-generated repr printed the API secret, the access key and
+the bot token in full, and `repr` reaches places the log filter does not — an
+f-string, a `print`, a traceback that renders locals, any handler that formats
+the object. Both `repr` and `str` now mask through the same path as
+`Settings.redacted()`, which was previously the only safe representation.
+
+The auth header and the Telegram API URL do still contain credentials, because
+the protocols require it. Those values are registered with the redaction filter,
+so they are scrubbed from every log handler and from formatted tracebacks.
 
 ---
 

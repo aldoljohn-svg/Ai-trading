@@ -418,7 +418,10 @@ class OrderFlowModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         flow = context.order_flow
         if flow is None:
-            return ModelOutput.no_signal(self.name, "no order-flow data available")
+            # No flow read was built at all -- a structurally absent input, not
+            # an abstention.  Counting it against participation caps the
+            # ensemble's conviction for a reason unrelated to the setup.
+            return ModelOutput.unavailable(self.name, "no order-flow data available")
         if flow.data_quality <= 0.2:
             return ModelOutput.no_signal(
                 self.name, "order-flow data too incomplete", data_quality=flow.data_quality
@@ -453,7 +456,7 @@ class LiquidityModel(AnalyticalModel):
     def evaluate(self, context: ModelContext) -> ModelOutput:
         liquidity = context.liquidity
         if liquidity is None:
-            return ModelOutput.no_signal(self.name, "no liquidity map")
+            return ModelOutput.unavailable(self.name, "no liquidity map")
 
         target = liquidity.dominant_target(context.price)
         if target is None:
@@ -718,7 +721,7 @@ class PortfolioRiskModel(AnalyticalModel):
         state = context.meta.get("portfolio_state")
         portfolio_risk = context.meta.get("portfolio_risk")
         if state is None or portfolio_risk is None:
-            return ModelOutput.no_signal(self.name, "no portfolio state")
+            return ModelOutput.unavailable(self.name, "no portfolio state")
 
         used = portfolio_risk.effective_risk_pct(state)
         cap = portfolio_risk.max_portfolio_risk
