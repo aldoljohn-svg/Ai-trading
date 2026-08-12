@@ -415,3 +415,71 @@ class TestScannerSettings:
         )
         assert settings.screen_count == 120
         assert settings.deep_analysis_count == 40
+
+
+class TestOrderBookDiagnostics:
+    """"Could not fetch" and "nobody is quoting" are different diagnoses.
+
+    Collapsing them into one "no order book available" message made the cause
+    impossible to see from the decision journal, which is where the operator
+    actually looks.
+    """
+
+    def test_a_failed_fetch_reports_the_exception(self):
+        from app.orderflow.microstructure import analyse_microstructure
+
+        read = analyse_microstructure(
+            None, notional=1000.0, unavailable_reason="depth fetch failed: timeout"
+        )
+        assert read.problems
+        assert "timeout" in read.problems[0]
+
+    def test_an_empty_book_says_nothing_is_quoting(self):
+        from app.domain import OrderBook
+        from app.orderflow.microstructure import analyse_microstructure
+
+        empty = OrderBook(symbol="X", ts=0, bids=(), asks=())
+        read = analyse_microstructure(empty, notional=1000.0)
+        assert "quoting" in read.problems[0]
+
+    def test_a_missing_book_with_no_reason_still_explains_itself(self):
+        from app.orderflow.microstructure import analyse_microstructure
+
+        read = analyse_microstructure(None, notional=1000.0)
+        assert read.problems
+        assert read.problems[0] != "no order book available"
+
+    def test_the_scanner_records_why_the_book_was_unusable(self):
+        class EmptyBookExchange(SyntheticExchange):
+            async def order_book(self, symbol, depth=20):
+                return OrderBook(symbol=symbol, ts=int(time.time()), bids=(), asks=())
+
+        async def run():
+            exchange = EmptyBookExchange()
+            await exchange.connect()
+            universe = UniverseBuilder(
+                min_quote_volume=1000.0, max_spread_pct=0.01, max_symbols=4
+            )
+            scanner = Scanner(MarketData(exchange), universe, deep_analysis_count=2)
+            analyses = await scanner.deep_analyse(await scanner.prescreen())
+            await exchange.close()
+            return analyses
+
+        for analysis in asyncio.run(run()):
+            assert analysis.book_problem, "the reason must be carried, not dropped"
+            assert "bids" in analysis.book_problem or "asks" in analysis.book_problem
+
+    def test_a_healthy_book_leaves_no_problem_recorded(self):
+        async def run():
+            exchange = SyntheticExchange()
+            await exchange.connect()
+            universe = UniverseBuilder(
+                min_quote_volume=1000.0, max_spread_pct=0.01, max_symbols=4
+            )
+            scanner = Scanner(MarketData(exchange), universe, deep_analysis_count=2)
+            analyses = await scanner.deep_analyse(await scanner.prescreen())
+            await exchange.close()
+            return analyses
+
+        for analysis in asyncio.run(run()):
+            assert analysis.book_problem == ""

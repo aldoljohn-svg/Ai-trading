@@ -177,6 +177,7 @@ class IntelligenceCoordinator:
             side=side,
             max_spread_pct=self.settings.max_spread_pct,
             max_slippage_pct=self.settings.max_slippage_pct,
+            unavailable_reason=getattr(analysis, "book_problem", "") or "",
             reference_spread_pct=self._reference(
                 self._spread_reference, analysis.symbol, analysis.candidate.spread_pct
             ),

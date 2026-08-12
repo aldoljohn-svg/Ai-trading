@@ -98,6 +98,7 @@ def analyse_microstructure(
     side: Side | None = None,
     max_spread_pct: float = 0.0008,
     max_slippage_pct: float = 0.003,
+    unavailable_reason: str = "",
     min_depth_multiple: float = 3.0,
     reference_spread_pct: float | None = None,
 ) -> MicrostructureRead:
@@ -111,7 +112,18 @@ def analyse_microstructure(
     read = MicrostructureRead()
 
     if book is None or not book.bids or not book.asks:
-        read.problems.append("no order book available")
+        # "Could not fetch" and "fetched, but nobody is quoting" are very
+        # different diagnoses -- one is our problem, the other is the market's.
+        # Collapsing them into one message made the cause impossible to see
+        # from the decision journal, so the caller passes the real reason
+        # through and it is reported verbatim.
+        if unavailable_reason:
+            read.problems.append(f"no order book: {unavailable_reason}")
+        elif book is None:
+            read.problems.append("no order book was fetched")
+        else:
+            side = "bids" if not book.bids else "asks"
+            read.problems.append(f"order book has no {side} - nothing is quoting")
         read.fillable = False
         read.data_quality = 0.0
         return read

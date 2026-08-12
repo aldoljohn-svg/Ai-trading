@@ -288,6 +288,10 @@ class SymbolAnalysis:
     anomaly: str
     ts: int
     errors: list[str] = field(default_factory=list)
+    #: Why the order book is missing, when it is.  Empty when the book is fine.
+    #: Carried so the decision journal can say "depth fetch failed: timeout"
+    #: rather than the useless "no order book available".
+    book_problem: str = ""
 
     # -- accessors --------------------------------------------------------
 
@@ -571,11 +575,13 @@ class Scanner:
                     errors.append(f"fundamentals: {exc}")
 
             order_book = None
+            book_problem = ""
             try:
                 fetched = await self.market_data.order_book(symbol, depth=20)
             except Exception as exc:  # noqa: BLE001 - depth is optional context
+                book_problem = f"depth fetch failed: {exc}"
                 errors.append(f"order book: {exc}")
-                self.universe.bench(symbol, f"depth fetch failed: {exc}")
+                self.universe.bench(symbol, book_problem)
             else:
                 if fetched.bids and fetched.asks:
                     order_book = fetched
@@ -584,7 +590,11 @@ class Scanner:
                     # An empty book is not a transient error, it means nothing
                     # is quoting.  Bench it rather than paying for the analysis
                     # again next cycle only to reject it for the same reason.
-                    errors.append("order book is empty")
+                    book_problem = (
+                        f"exchange returned {len(fetched.bids)} bids / "
+                        f"{len(fetched.asks)} asks"
+                    )
+                    errors.append(f"order book is empty ({book_problem})")
                     self.universe.bench(symbol, "order book came back empty")
 
             return SymbolAnalysis(
@@ -597,6 +607,7 @@ class Scanner:
                 alignment=alignment,
                 fundamentals=fundamentals,
                 order_book=order_book,
+                book_problem=book_problem,
                 anomaly=anomaly,
                 ts=int(time.time()),
                 errors=errors,
