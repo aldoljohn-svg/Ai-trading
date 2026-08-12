@@ -396,3 +396,76 @@ class TestTheColdStartTaxIsBoundedAndDecays:
         """It costs a fraction of quality; it is not a veto."""
 
         assert 1.0 - 0.5 * self._risk(0) > 0.75
+
+
+class TestTheQualityGateIsReachableAtTheColdStart:
+    """45 has to actually admit the setups the cold-start penalty depresses."""
+
+    def test_the_default_is_forty_five(self, settings):
+        assert settings.min_trade_quality == 45.0
+
+    def test_a_solid_setup_clears_it_despite_the_cold_start(self):
+        from app.domain import Regime
+        from app.ensemble.base import ModelSignal
+        from app.quality.trade_quality import compute_trade_quality
+
+        class Ensemble:
+            signal = ModelSignal.LONG
+            agreement = 0.78
+            participation = 0.62
+            dissent = 0.22
+            data_quality = 0.85
+            aggregate_risk = 0.25
+            confidence = 0.42          # a 78/22 vote at 62% attendance
+
+        class ColdStartModelRisk:
+            score = 0.356              # no resolved trades, no trained model
+
+        quality = compute_trade_quality(
+            ensemble=Ensemble(),
+            regime=Regime.TREND_UP,
+            rr=2.2,
+            min_rr=1.7,
+            model_risk=ColdStartModelRisk(),
+            portfolio_headroom=1.0,
+            minimum=45.0,
+        )
+        assert quality.acceptable, quality.summary()
+
+    def test_a_weak_setup_is_still_refused_at_forty_five(self):
+        """Lowering the bar must not turn it into no bar."""
+
+        from app.domain import Regime
+        from app.ensemble.base import ModelSignal
+        from app.quality.trade_quality import compute_trade_quality
+
+        class Ensemble:
+            signal = ModelSignal.LONG
+            agreement = 0.54
+            participation = 0.40
+            dissent = 0.46
+            data_quality = 0.5
+            aggregate_risk = 0.5
+            confidence = 0.06
+
+        class ColdStartModelRisk:
+            score = 0.356
+
+        quality = compute_trade_quality(
+            ensemble=Ensemble(),
+            regime=Regime.TRANSITION,
+            rr=1.4,
+            min_rr=1.7,
+            model_risk=ColdStartModelRisk(),
+            minimum=45.0,
+        )
+        assert not quality.acceptable, quality.summary()
+
+    def test_the_other_gates_are_untouched(self, settings):
+        """Only the quality gate moved; nothing else was loosened."""
+
+        assert settings.min_rr == 1.7
+        assert settings.min_confidence == 0.70
+        assert settings.min_model_agreement == 0.60
+        assert settings.max_daily_loss == 0.02
+        assert settings.max_leverage == 3.0

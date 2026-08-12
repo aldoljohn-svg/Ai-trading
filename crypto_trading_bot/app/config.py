@@ -404,7 +404,14 @@ class Settings:
     #: Estimated slippage (as a fraction) above which execution risk is fatal.
     max_slippage_pct: float = 0.0035
     #: Minimum composite trade-quality score (0-100) required to enter.
-    min_trade_quality: float = 55.0
+    #: Composite quality gate, 0-100.  Set to 45 rather than 55 because a fresh
+    #: install carries a cold-start model-risk penalty of ~0.36 -- no resolved
+    #: trades in any regime, no trained ML model -- which costs about 18% of the
+    #: score outright.  At 55 that combination suppressed nearly every entry, and
+    #: the trades that would retire the penalty are exactly the ones it blocked.
+    #: The penalty decays to ~4% by twenty resolved trades; raise this back to 55
+    #: once the record exists.
+    min_trade_quality: float = 45.0
     #: Minimum shrunk expected value, in R, required to enter.
     min_expected_value_r: float = 0.05
     #: Anomaly severity (0-1) at or above which entries are blocked.

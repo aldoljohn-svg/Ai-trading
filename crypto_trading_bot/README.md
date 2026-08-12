@@ -1122,7 +1122,24 @@ risk score can never push quality up.
 
 Quality blends signal, regime fit, order flow, liquidity, reward:risk and
 portfolio headroom into one comparable 0–100 figure, then applies the risk
-penalties. Entries need `MIN_TRADE_QUALITY`.
+penalties. Entries need `MIN_TRADE_QUALITY`, which defaults to **45**.
+
+45 rather than a rounder-looking 55 because of the cold start. Model risk on a
+fresh install is about 0.36 — no resolved trades in any regime, no trained ML
+model — and that is a flat ~18% off the score before any setup is examined. At
+55 the practical effect was that almost nothing traded, and the trades that
+would have retired the penalty were precisely the ones being blocked. Measured
+against the shipped model roster:
+
+| Resolved trades | Model risk | Cost to quality |
+|---|---|---|
+| 0 | 0.356 | 17.8% |
+| 10 | 0.218 | 10.9% |
+| 20 | 0.080 | 4.0% |
+
+The penalty is deliberate and it works itself off. Once twenty trades have
+resolved, raising this back to 55 asks for roughly the same standard that 45
+asks for today.
 
 Expected value is computed in R, net of fees, spread and estimated slippage, and
 accounts for the partial-exit ladder — scaling out lowers the average win, and
