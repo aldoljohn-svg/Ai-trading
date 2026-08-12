@@ -800,6 +800,25 @@ for `ORDER_BOOK_BENCH_MINUTES`. Without that, a dead instrument consumes a
 deep-analysis slot every single cycle and produces the same execution-risk
 rejection forever.
 
+**A rate limit is not a benchable offence.** Depth is the one endpoint that
+cannot be cached across cycles, so a wide scan fires one request per symbol at
+once, and MEXC answers with `Requests are too frequent` — in the *body* of an
+HTTP 200, which is why the transport's 429 handling never saw it and it arrived
+as a generic error indistinguishable from "this symbol has no book". The result
+was BTC, DOT, AVAX and friends benched for half an hour over a mistake of ours.
+Four things now prevent it:
+
+* `MexcFuturesExchange._unwrap` recognises the throttle phrasings and raises
+  `ExchangeRateLimit`, so the condition is nameable;
+* depth is charged two rate-limiter tokens, the same as klines;
+* `MarketData` coalesces concurrent depth requests per symbol, caps them at
+  `ORDER_BOOK_CONCURRENCY` (2) in flight, caches for `ORDER_BOOK_TTL_SECONDS`
+  (20), and on a throttled *refresh* serves the last book if it is under two
+  minutes old — a stale book is not the same as no book, and its timestamp is
+  the real one either way;
+* the scanner does not bench a symbol whose depth was throttled. Genuine depth
+  failures — no such contract, an empty book — still bench exactly as before.
+
 **2. Screen — one timeframe per symbol.** A ticker tells you a coin is liquid;
 it says nothing about whether anything is *happening* on the chart. This stage
 pulls a single timeframe (`SCREEN_TIMEFRAME`, default 1h) for the top

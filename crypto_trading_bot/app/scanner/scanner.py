@@ -35,6 +35,7 @@ from app.domain import (
     Ticker,
     Timeframe,
 )
+from app.exchange.base import ExchangeRateLimit
 from app.fundamental.sentiment import FundamentalEngine, FundamentalSnapshot
 from app.ict.ict_engine import ICTAnalysis, analyse_ict
 from app.indicators.indicators import IndicatorSet, compute_indicators
@@ -578,6 +579,14 @@ class Scanner:
             book_problem = ""
             try:
                 fetched = await self.market_data.order_book(symbol, depth=20)
+            except ExchangeRateLimit as exc:
+                # We asked too fast.  That is a fact about this process, not
+                # about the instrument, and benching BTC for thirty minutes
+                # because of our own request rate is not a judgement the
+                # scanner is entitled to make.  Report it and try again next
+                # cycle; the throttling itself is handled upstream.
+                book_problem = f"depth throttled by the venue: {exc}"
+                errors.append(f"order book: {exc}")
             except Exception as exc:  # noqa: BLE001 - depth is optional context
                 book_problem = f"depth fetch failed: {exc}"
                 errors.append(f"order book: {exc}")

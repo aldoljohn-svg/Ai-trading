@@ -285,6 +285,11 @@ class Settings:
     screen_concurrency: int = 12
     scanner_concurrency: int = 6
     market_data_concurrency: int = 8
+    #: Depth is throttled separately and much harder.  Unlike candles it is not
+    #: cached across cycles, so a wide scan is a burst of one request per
+    #: symbol -- which is what MEXC answered with "Requests are too frequent".
+    order_book_concurrency: int = 2
+    order_book_ttl_seconds: float = 20.0
     #: Instrument classes allowed into the universe.  CRYPTO is always allowed.
     #: Add TOKENISED_EQUITY, INDEX, COMMODITY, FX or STABLECOIN to admit those,
     #: or ALL to disable the filter.  They are excluded by default because they
@@ -690,7 +695,14 @@ def validate(settings: Settings) -> Settings:
         )
     if settings.screen_count > settings.max_symbols_to_scan:
         errors.append("screen_count must not exceed max_symbols_to_scan")
-    for name in ("screen_concurrency", "scanner_concurrency", "market_data_concurrency"):
+    if settings.order_book_ttl_seconds < 0:
+        errors.append("order_book_ttl_seconds must not be negative")
+    for name in (
+        "screen_concurrency",
+        "scanner_concurrency",
+        "market_data_concurrency",
+        "order_book_concurrency",
+    ):
         value = getattr(settings, name)
         if value < 1:
             errors.append(f"{name} must be >= 1")

@@ -30,9 +30,11 @@ order succeeded.  PAPER and BACKTEST modes are unaffected.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import random
 import time
 from typing import Any, Mapping
 
@@ -58,6 +60,7 @@ from app.exchange.base import (
     ExchangeAuthError,
     ExchangeError,
     ExchangeNotSupported,
+    ExchangeRateLimit,
     ExchangeUnavailable,
 )
 from app.exchange.http_client import AsyncHttpClient
@@ -111,6 +114,27 @@ _MAINTENANCE_MARKERS = (
     "not open yet",
     "temporarily",
 )
+
+#: MEXC reports throttling in the *body* of an HTTP 200 response rather than
+#: with a 429, so the transport's rate-limit handling in
+#: :class:`~app.exchange.http_client.AsyncHttpClient` never sees it.  Without
+#: these markers "Requests are too frequent" arrived as a generic
+#: :class:`ExchangeError`, indistinguishable from "this symbol has no book" --
+#: which made the scanner bench liquid majors for half an hour because *we*
+#: asked too fast.
+_RATE_LIMIT_MARKERS = (
+    "too frequent",
+    "too many request",
+    "rate limit",
+    "frequency limit",
+    "request frequency",
+)
+
+#: Extra attempts made when MEXC says "slow down".  Deliberately small: the
+#: real fix is asking less often (see the token-bucket costs below and the
+#: order-book throttle in :mod:`app.data.market_data`), not retrying harder.
+_RATE_LIMIT_RETRIES = 2
+_RATE_LIMIT_BACKOFF = 0.6
 
 
 class MexcFuturesExchange(BaseExchange):
@@ -211,6 +235,8 @@ class MexcFuturesExchange(BaseExchange):
             return payload.get("data")
         message = str(payload.get("message") or payload.get("msg") or payload)
         lowered = message.lower()
+        if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+            raise ExchangeRateLimit(f"{context}: {message}")
         if any(marker in lowered for marker in _MAINTENANCE_MARKERS):
             raise ExchangeNotSupported(
                 f"{context}: MEXC reports this endpoint unavailable for this "
@@ -224,8 +250,21 @@ class MexcFuturesExchange(BaseExchange):
     async def _public(
         self, path: str, params: Mapping[str, Any] | None = None, cost: float = 1.0
     ) -> Any:
-        payload = await self.http.get_json(path, params=params, cost=cost)
-        return self._unwrap(payload, f"GET {path}")
+        last: ExchangeRateLimit | None = None
+        for attempt in range(_RATE_LIMIT_RETRIES + 1):
+            payload = await self.http.get_json(path, params=params, cost=cost)
+            try:
+                return self._unwrap(payload, f"GET {path}")
+            except ExchangeRateLimit as exc:
+                last = exc
+                if attempt == _RATE_LIMIT_RETRIES:
+                    break
+                # Jittered so a burst of symbols rate-limited together does not
+                # come back in lockstep and trip the same limit again.
+                delay = _RATE_LIMIT_BACKOFF * (2**attempt)
+                await asyncio.sleep(delay * (0.5 + random.random()))
+        assert last is not None
+        raise last
 
     async def _private_get(
         self, path: str, params: Mapping[str, Any] | None = None, cost: float = 1.0
@@ -342,8 +381,12 @@ class MexcFuturesExchange(BaseExchange):
 
     async def order_book(self, symbol: str, depth: int = 20) -> OrderBook:
         native = await self._native(symbol)
+        # Weighted like klines: depth is a per-symbol endpoint the scanner hits
+        # once for every candidate, so charging it a single token let a wide
+        # scan drain the venue's budget and come back "Requests are too
+        # frequent" for majors that trade perfectly well.
         data = await self._public(
-            f"/api/v1/contract/depth/{native}", params={"limit": depth}
+            f"/api/v1/contract/depth/{native}", params={"limit": depth}, cost=2.0
         )
         if not isinstance(data, dict):
             raise ExchangeError(f"unexpected depth payload for {symbol}")

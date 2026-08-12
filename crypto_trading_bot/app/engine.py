@@ -180,6 +180,8 @@ class TradingEngine:
             store=CandleStore(),
             candle_repository=self.repositories.candles,
             max_concurrency=settings.market_data_concurrency,
+            book_concurrency=settings.order_book_concurrency,
+            book_ttl=settings.order_book_ttl_seconds,
         )
 
         universe = UniverseBuilder(
